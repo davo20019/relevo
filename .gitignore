@@ -1,0 +1,11 @@
+.relay/
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# per-user state from agent CLIs that may run in this dir
+.antigravitycli/
+.cursor/
+.codex/
+.claude/

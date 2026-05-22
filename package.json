@@ -1,0 +1,59 @@
+{
+  "name": "relevo",
+  "version": "0.1.0",
+  "description": "A tiny REPL that dispatches prompts to multiple coding-agent CLIs in parallel and feeds each agent the others' recent transcripts as context.",
+  "type": "module",
+  "bin": {
+    "relevo": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "agents.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.tsx",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ink": "^7.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "cli",
+    "agents",
+    "claude",
+    "codex",
+    "cursor",
+    "repl",
+    "tui",
+    "ink"
+  ],
+  "license": "MIT",
+  "author": "David Loor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davo20019/relevo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davo20019/relevo/issues"
+  },
+  "homepage": "https://github.com/davo20019/relevo#readme"
+}
