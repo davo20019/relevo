@@ -80,4 +80,16 @@ describe("renderRawFallback", () => {
     expect(out).toContain("not json at all");
     expect(out).not.toContain('"type"');
   });
+
+  it("filters rust tracing lines (ISO timestamp + level + module path)", () => {
+    const lines = [
+      "2026-05-22T15:03:55.382713Z ERROR rmcp::transport::worker: worker quit with fatal: ...\n",
+      "2026-05-22T15:03:58.807070Z ERROR codex_core::compact_remote: remote compaction failed turn_id=abc\n",
+      "[error] Error running remote compact task: You've hit your usage limit.\n",
+    ];
+    const out = renderRawFallback(lines);
+    expect(out).not.toContain("rmcp::transport::worker");
+    expect(out).not.toContain("codex_core::compact_remote");
+    expect(out).toContain("usage limit");
+  });
 });

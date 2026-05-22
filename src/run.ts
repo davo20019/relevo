@@ -67,9 +67,13 @@ export function displayText(run: AgentRunState): string {
   if (!run.liveMaxLines || run.liveMaxLines <= 0) return text;
   const lines = text.split("\n");
   if (lines.length <= run.liveMaxLines) return text;
-  const hidden = lines.length - run.liveMaxLines;
-  const tail = lines.slice(-run.liveMaxLines).join("\n");
-  return `... ${hidden} earlier lines hidden during live preview ...\n${tail}`;
+  return lines.slice(-run.liveMaxLines).join("\n");
+}
+
+export function hiddenLines(run: AgentRunState): number {
+  if (!run.liveMaxLines || run.liveMaxLines <= 0) return 0;
+  const lines = run.displayChunks.join("").split("\n");
+  return Math.max(0, lines.length - run.liveMaxLines);
 }
 
 type PreparedCommand = {
@@ -188,11 +192,32 @@ export type StreamOptions = {
   verbose: boolean;
 };
 
+export type StreamResult = { exitCode: number; sessionInvalid: boolean };
+
+// Patterns emitted by various CLIs when a --resume target no longer exists.
+// Conservative on purpose — false positives would trigger an unnecessary retry.
+const INVALID_SESSION_RE =
+  /(no conversation found with session id|conversation not found|session (?:not found|does not exist|expired|is invalid)|no such session|unknown session)/i;
+
+export function resetRunForRetry(run: AgentRunState, note: string): void {
+  run.displayChunks = note ? [note] : [];
+  run.responseChunks = [];
+  run.nCommands = 0;
+  run.nEdits = 0;
+  run.running = true;
+  run.finalStatus = null;
+  run.end = null;
+  run.cancelled = false;
+  run.interrupted = false;
+  run.start = Date.now();
+}
+
 // Stream stdout/stderr lines through the parser into run state. Resolves when
 // the child closes. Sets the final status based on cancelled/interrupted/exit.
-export async function streamToRun(opts: StreamOptions): Promise<number> {
+export async function streamToRun(opts: StreamOptions): Promise<StreamResult> {
   const { run, proc, parser, agentName, preGen, sessionId, verbose } = opts;
   let captured = sessionId;
+  let sessionInvalid = false;
   const rawTail: string[] = [];
 
   // Merge stdout and stderr into a single line stream (matches subprocess.STDOUT=PIPE).
@@ -203,6 +228,7 @@ export async function streamToRun(opts: StreamOptions): Promise<number> {
     const withLf = line + "\n";
     rawTail.push(withLf);
     if (rawTail.length > 40) rawTail.shift();
+    if (!sessionInvalid && INVALID_SESSION_RE.test(line)) sessionInvalid = true;
     const { kind, payload } = parser(withLf);
     if (kind === "message" && payload) {
       run.displayChunks.push(payload);
@@ -252,7 +278,7 @@ export async function streamToRun(opts: StreamOptions): Promise<number> {
     }
     setFinal(run, `exit ${exitCode}`);
   }
-  return exitCode;
+  return { exitCode, sessionInvalid };
 }
 
 export function cancelRuns(runs: AgentRunState[], procs: ChildProcessWithoutNullStreams[]): void {

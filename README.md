@@ -1,9 +1,9 @@
 # relevo
 
-A tiny REPL that sits in front of multiple coding-agent CLIs so you can drive
-Claude Code, Codex, OpenCode, Cursor CLI, Antigravity (`agy`), and similar tools
-from one terminal. Each agent's transcript is fed back to the others as context,
-and you can fan a prompt out to several agents in parallel.
+A multi-agent coding workspace that sits in front of local coding-agent CLIs so
+you can drive Claude Code, Codex, OpenCode, Cursor CLI, Antigravity (`agy`), and
+similar tools from one terminal. Each agent's transcript is fed back to the
+others as context, and you can fan a prompt out to several agents in parallel.
 
 ## Why
 
@@ -35,7 +35,7 @@ Built-in defaults are provided for:
 
 Other CLIs such as Gemini or Aider can be added by editing `agents.json`.
 
-You log into each CLI normally once. This script just shells out, so your
+You log into each CLI normally once. relevo just shells out, so your
 existing auth is reused.
 
 ## Quickstart
@@ -58,8 +58,9 @@ npx relevo
 npm i -g relevo && relevo
 ```
 
-First run creates `agents.json` with six agents wired up: `claude`, `codex`,
-`cursor`, `opencode`, `agy` (Antigravity), and `pi`. Type `/help` inside the REPL.
+First run creates `~/.config/relevo/agents.json` with six agents wired up:
+`claude`, `codex`, `cursor`, `opencode`, `agy` (Antigravity), and `pi`. Type
+`/help` inside the REPL.
 
 ## Usage
 
@@ -132,8 +133,11 @@ are extracted, attached to the next dispatch, and removed from the prompt text.
 
 ## Configuration
 
-Edit `agents.json` to change commands or add agents. The generated defaults look
-like this:
+Edit your user config at `~/.config/relevo/agents.json` to change commands or
+add agents. If `./agents.json` exists in the directory where you launch
+`relevo`, it is used as a project-local override. You can also set
+`RELEVO_CONFIG=/path/to/agents.json` to point at a specific config file. The
+generated defaults look like this:
 
 ```json
 {
@@ -246,6 +250,10 @@ flag or switch Claude back to `--permission-mode acceptEdits`.
   transcript context. Their outputs become context for the next turn, not for
   each other during the same fanout.
 - Press `Esc` to cancel a running single-agent or parallel dispatch.
+- If an agent's saved native session is no longer valid (the underlying CLI
+  reports the session as expired or missing), relevo drops the stale session
+  ID and automatically retries the call once with a fresh session. You'll see
+  a `session expired, retrying with a fresh session` line when this happens.
 - The shared cwd is the directory where you launched `relevo`.
 - relevo is an interactive terminal UI, not a PTY automation API or log-safe
   batch interface. Run it directly in a terminal; use each underlying CLI

@@ -47,17 +47,52 @@ export function parserCodexJson(line: string): ParseResult {
   return NULL;
 }
 
+// Heuristic narration starters for agy. agy 1.0.1 has no JSON output mode, so
+// the parser walks its plain-text stream and routes anything that looks like
+// "I'm about to do X" to the hidden command counter rather than rendering it.
+// Each entry is a *prefix* (matched with startsWith). Prefer phrases that
+// almost always begin a plan/narration line and rarely begin a final answer:
+//   ✓ safe: "I will", "Let me", "Going to", "Reading", "Examining"
+//   ✗ risky: "I see", "I have", "Found", "Based on" — too often answer openers
 const AGY_PLAN_PREFIXES = [
+  // first-person plan statements
   "I will ",
   "I'll ",
   "I am going to ",
+  "I'm going to ",
   "I need to ",
   "I should ",
+  "I'm planning to ",
+  // explicit transitions
   "Let me ",
+  "Let's ",
   "First, I ",
+  "First I ",
   "Next, I ",
   "Then I ",
   "Now I ",
+  "Now I'll ",
+  "Now let me ",
+  "To start, ",
+  "To begin, ",
+  "Step ",
+  // tool-action narration (extremely common in agy)
+  "Going to ",
+  "Reading ",
+  "Examining ",
+  "Searching ",
+  "Checking ",
+  "Looking at ",
+  "Inspecting ",
+  "Scanning ",
+  "Listing ",
+  "Loading ",
+  "Opening ",
+  "Running ",
+  "Executing ",
+  // status-y narration
+  "Calling ",
+  "Invoking ",
 ];
 
 export function parserCursorJson(line: string): ParseResult {
@@ -133,12 +168,17 @@ export const PARSERS: Record<string, LineParser> = {
   "agy-text": parserAgyText,
 };
 
+// Rust `tracing` lines: ISO8601 timestamp, level, then a `module::path:` prefix.
+// These dominate codex's stderr on failure and obscure the real error.
+const RUST_TRACE_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+\S+:/;
+
 export function renderRawFallback(rawLines: string[]): string {
   // Turn buffered subprocess output into something readable when the parser found nothing.
   const out: string[] = [];
   for (const line of rawLines) {
     const s = line.trim();
     if (!s) continue;
+    if (RUST_TRACE_RE.test(s)) continue;
     let evt: any;
     try {
       evt = JSON.parse(s);

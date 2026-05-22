@@ -1,7 +1,7 @@
 {
   "name": "relevo",
   "version": "0.1.0",
-  "description": "A tiny REPL that dispatches prompts to multiple coding-agent CLIs in parallel and feeds each agent the others' recent transcripts as context.",
+  "description": "A multi-agent coding workspace for coordinating local AI coding CLIs with shared context and native session resume.",
   "type": "module",
   "bin": {
     "relevo": "dist/cli.js"
@@ -11,22 +11,23 @@
     "dist",
     "agents.json",
     "README.md",
+    "CONTRIBUTING.md",
     "LICENSE"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc",
     "dev": "tsx src/cli.tsx",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "ink": "^7.0.0",
-    "ink-text-input": "^6.0.0",
     "react": "^19.0.0"
   },
   "devDependencies": {

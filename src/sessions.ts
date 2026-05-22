@@ -27,3 +27,12 @@ export function clearSessions(): void {
   const f = sessionsFile();
   if (existsSync(f)) unlinkSync(f);
 }
+
+export async function clearAgentSession(agent: string): Promise<void> {
+  const sessions = loadSessions();
+  if (!(agent in sessions)) return;
+  delete sessions[agent];
+  const f = sessionsFile();
+  await mkdir(path.dirname(f), { recursive: true });
+  await writeFile(f, JSON.stringify(sessions, null, 2));
+}

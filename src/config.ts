@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import which from "./which.js";
 import { CONFIG_PATH } from "./paths.js";
 
@@ -67,7 +68,15 @@ export const DEFAULT_CONFIG: AgentConfig = {
   context_turns: 3,
 };
 
-export const AGENT_COLORS = ["cyan", "magenta", "green", "yellow", "blue"] as const;
+// 24-bit hex colors so the palette reads as deliberate and technical rather
+// than the default ANSI candy-shop. Ink's Text component accepts hex strings.
+export const AGENT_COLORS = [
+  "#5DD8E3", // cyan
+  "#D85DB4", // mauve magenta
+  "#7BD862", // technical green
+  "#E0C75D", // warm yellow
+  "#5DA0E3", // azure
+] as const;
 
 export const SLASH_COMMANDS = [
   "/help",
@@ -90,6 +99,7 @@ export const SLASH_COMMANDS = [
 
 export function loadConfig(notify?: (msg: string) => void): AgentConfig {
   if (!existsSync(CONFIG_PATH)) {
+    mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
     writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
     notify?.(`created default config at ${CONFIG_PATH}`);
   }
@@ -97,6 +107,7 @@ export function loadConfig(notify?: (msg: string) => void): AgentConfig {
 }
 
 export function saveConfig(config: AgentConfig): void {
+  mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 

@@ -1,16 +1,16 @@
 import { Box, Text } from "ink";
 
+// One leading angle quote in cyan + the prompt at default weight. The glyph
+// and indentation are enough to signal "this is what you said" without a
+// header line saying so.
 export function UserPrompt({ prompt }: { prompt: string }) {
   const shown = prompt.trim() ? prompt : "(empty)";
   return (
-    <Box flexDirection="column" paddingLeft={2} marginTop={0} marginBottom={1}>
-      <Text>
-        <Text bold inverse color="cyan">
-          @you
-        </Text>
-        <Text dimColor> submitted</Text>
+    <Box paddingLeft={1} marginTop={0} marginBottom={1}>
+      <Text color="cyan" bold>
+        ›{" "}
       </Text>
-      <Text bold>{shown}</Text>
+      <Text>{shown}</Text>
     </Box>
   );
 }

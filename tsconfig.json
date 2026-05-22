@@ -13,7 +13,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "declaration": false,
-    "sourceMap": false,
+    "sourceMap": true,
     "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*"],

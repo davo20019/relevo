@@ -2,8 +2,13 @@ import { SLASH_COMMANDS } from "./config.js";
 
 const AGENT_TOKEN = /^@([A-Za-z0-9_\-]+)[,.;:!?]*\s*([\s\S]*)$/;
 const ANY_MENTION = /@([A-Za-z0-9_\-]+)/g;
-const MULTI_PREFIX = /^((?:@[A-Za-z0-9_\-]+[,.;:!?]*\s+)+)([\s\S]*)$/;
 export const ALL_TOKEN = /^@all\b[,.;:!?]*\s*/i;
+
+// Word-shaped soft connectors users actually type between agent mentions in
+// natural multi-dispatches: "@claude and @codex hi", "@claude, @codex hi",
+// "@claude + @codex hi", "@claude & @codex hi". Standalone punctuation like
+// `,` or `;` is also accepted.
+const MULTI_CONNECTOR = /^(?:and|&|\+|,|;)/i;
 
 export type Pending = { pendingPrompt: string | null };
 
@@ -29,21 +34,57 @@ export function parseMulti(
   line: string,
   knownAgents: string[],
 ): { agents: string[]; body: string } | null {
+  // Walk a leading sequence of `@<known>` mentions, tolerating whitespace and
+  // soft connector words between them. Stop at the first thing that isn't a
+  // known mention or a connector — that's where the prompt body begins.
+  //
+  // Matches: "@a @b hi", "@a and @b hi", "@a, @b hi", "@a+@b hi",
+  //          "@a, @b, @c review this"
+  // Doesn't match (falls through to single-dispatch routing):
+  //   "@a hi"               — only one mention
+  //   "and @a @b hi"        — leading non-mention text
+  //   "@unknown @a hi"      — first mention isn't a configured agent
   const trimmed = line.trim();
-  const m = MULTI_PREFIX.exec(trimmed);
-  if (!m) return null;
-  const prefix = m[1]!;
-  const body = m[2]!;
   const mentions: string[] = [];
-  let mm: RegExpExecArray | null;
-  const re = /@([A-Za-z0-9_\-]+)/g;
-  while ((mm = re.exec(prefix))) mentions.push(mm[1]!);
+  let i = 0;
+
+  const skipWs = (): void => {
+    while (i < trimmed.length && /\s/.test(trimmed[i]!)) i++;
+  };
+  const tryConnector = (): boolean => {
+    const rest = trimmed.slice(i);
+    const m = MULTI_CONNECTOR.exec(rest);
+    if (!m) return false;
+    // Require a word-boundary so "android" doesn't get parsed as "and".
+    const next = rest[m[0].length];
+    if (m[0].toLowerCase() === "and" && next !== undefined && /[A-Za-z]/.test(next)) {
+      return false;
+    }
+    i += m[0].length;
+    return true;
+  };
+
+  while (i < trimmed.length) {
+    skipWs();
+    if (mentions.length > 0) {
+      // Optional connector between mentions, then more whitespace.
+      tryConnector();
+      skipWs();
+    }
+    if (trimmed[i] !== "@") break;
+    const m = /^@([A-Za-z0-9_\-]+)[,.;:!?]*/.exec(trimmed.slice(i));
+    if (!m) break;
+    const name = m[1]!;
+    if (!knownAgents.includes(name)) break;
+    mentions.push(name);
+    i += m[0].length;
+  }
+
   if (mentions.length < 2) return null;
-  if (!mentions.every((a) => knownAgents.includes(a))) return null;
   const seen: string[] = [];
   for (const a of mentions) if (!seen.includes(a)) seen.push(a);
   if (seen.length < 2) return null;
-  return { agents: seen, body: body.trim() };
+  return { agents: seen, body: trimmed.slice(i).trim() };
 }
 
 export function smartRoute(line: string, knownAgents: string[]): string {

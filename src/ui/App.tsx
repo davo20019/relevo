@@ -6,6 +6,7 @@ import {
   availableAgentNames,
   loadConfig,
   saveConfig,
+  SLASH_COMMANDS,
   unavailableAgentReasons,
   type AgentConfig,
   type AgentSpec,
@@ -22,7 +23,7 @@ import {
   setCurrentTask,
   transcriptDir,
 } from "../paths.js";
-import { clearSessions, loadSessions } from "../sessions.js";
+import { clearAgentSession, clearSessions, loadSessions } from "../sessions.js";
 import { appendTurn, readLastTurns } from "../transcripts.js";
 import { existsSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import path from "node:path";
@@ -37,22 +38,35 @@ import {
 import {
   newRun,
   prepareCommand,
+  resetRunForRetry,
   spawnProc,
   streamToRun,
   cancelRuns,
   captureDirSession,
   type AgentRunState,
 } from "../run.js";
-import { AgentPanel } from "./AgentPanel.js";
 import { BottomToolbar } from "./BottomToolbar.js";
-import { PromptInput } from "./PromptInput.js";
+import { MultilineInput } from "./MultilineInput.js";
+import { PanelRow } from "./PanelRow.js";
+import { Separator } from "./Separator.js";
 import { UserPrompt } from "./UserPrompt.js";
+
+function formatClockLabel(turn: { at: Date; task: string }): string {
+  const hh = String(turn.at.getHours()).padStart(2, "0");
+  const mm = String(turn.at.getMinutes()).padStart(2, "0");
+  const ss = String(turn.at.getSeconds()).padStart(2, "0");
+  // Include the task name on double separators implicitly through the heavier
+  // rule; the timestamp alone is enough text in the rule.
+  return `${hh}:${mm}:${ss}  ·  ${turn.task}`;
+}
 
 type LogLine = { id: string; text: string; color?: string };
 type CompletedTurn = {
   id: string;
   prompt: string;
   runs: AgentRunState[];
+  task: string;
+  at: Date;
 };
 type HistoryItem =
   | { kind: "log"; line: LogLine }
@@ -122,8 +136,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       }
       const proc = spawned.proc!;
       activeProcsRef.current = [spawned];
+      let activePrep = prep;
       try {
-        await streamToRun({
+        const result = await streamToRun({
           run,
           proc,
           parser: prep.parser,
@@ -132,18 +147,52 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           sessionId: prep.sessionId,
           verbose: sessionStateRef.current.verbose,
         });
+        const recoverable =
+          result.sessionInvalid &&
+          result.exitCode !== 0 &&
+          !run.cancelled &&
+          !run.interrupted &&
+          Boolean(spec.resume_template);
+        if (recoverable) {
+          await clearAgentSession(agentName);
+          const retryPrep = await prepareCommand(agentName, spec, fullPrompt);
+          const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
+          if (retrySpawned.error) {
+            log(`@${agentName} session expired and retry failed: ${retrySpawned.error}`, "red");
+          } else {
+            log(`@${agentName} ↻ session expired, retrying with a fresh session`, "yellow");
+            resetRunForRetry(run, "");
+            activeProcsRef.current = [retrySpawned];
+            activePrep = retryPrep;
+            await streamToRun({
+              run,
+              proc: retrySpawned.proc!,
+              parser: retryPrep.parser,
+              agentName,
+              preGen: retryPrep.preGen,
+              sessionId: retryPrep.sessionId,
+              verbose: sessionStateRef.current.verbose,
+            });
+          }
+        }
       } finally {
         activeProcsRef.current = [];
       }
       if (!run.cancelled && !run.interrupted && run.finalStatus === "done") {
-        await captureDirSession(agentName, spec, prep.dirSnapshot);
+        await captureDirSession(agentName, spec, activePrep.dirSnapshot);
       }
       sessionStateRef.current.lastAgent = agentName;
       sessionStateRef.current.lastElapsed = (run.end! - run.start) / 1000;
       sessionStateRef.current.lastStatus =
         run.cancelled ? "cancelled" : run.interrupted ? "interrupted" : run.finalStatus ?? "?";
 
-      const completed: CompletedTurn = { id: nextId(), prompt: userPrompt, runs: [run] };
+      const completed: CompletedTurn = {
+        id: nextId(),
+        prompt: userPrompt,
+        runs: [run],
+        task: currentTask(),
+        at: new Date(),
+      };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
       setActiveRuns([]);
       setActivePromptText(null);
@@ -159,7 +208,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       userPrompt: string,
       perAgentFullPrompts: Record<string, string>,
     ) => {
-      const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", 12));
+      // Live preview height scales with terminal rows so tall windows show
+      // more context per panel. Capped at 24 so very tall screens don't make
+      // a single dispatch eat the whole transcript area.
+      const rows = process.stdout.rows ?? 30;
+      const liveMax = Math.max(8, Math.min(24, Math.floor(rows / 3)));
+      const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", liveMax));
       setActiveRuns(runs);
       setActivePromptText(userPrompt);
 
@@ -176,14 +230,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       activeProcsRef.current = prepared.map((p) => p.spawned);
 
       await Promise.all(
-        prepared.map(async (p) => {
+        prepared.map(async (p, i) => {
           if (p.spawned.error) {
             p.run.running = false;
             p.run.finalStatus = p.spawned.error;
             p.run.end = Date.now();
             return;
           }
-          await streamToRun({
+          const result = await streamToRun({
             run: p.run,
             proc: p.spawned.proc!,
             parser: p.prep.parser,
@@ -192,10 +246,45 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             sessionId: p.prep.sessionId,
             verbose: sessionStateRef.current.verbose,
           });
+          const recoverable =
+            result.sessionInvalid &&
+            result.exitCode !== 0 &&
+            !p.run.cancelled &&
+            !p.run.interrupted &&
+            Boolean(p.spec.resume_template);
+          if (!recoverable) return;
+          const fullPrompt = perAgentFullPrompts[p.name]!;
+          await clearAgentSession(p.name);
+          const retryPrep = await prepareCommand(p.name, p.spec, fullPrompt);
+          const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
+          if (retrySpawned.error) {
+            log(`@${p.name} session expired and retry failed: ${retrySpawned.error}`, "red");
+            return;
+          }
+          log(`@${p.name} ↻ session expired, retrying with a fresh session`, "yellow");
+          resetRunForRetry(p.run, "");
+          p.spawned = retrySpawned;
+          p.prep = retryPrep;
+          activeProcsRef.current[i] = retrySpawned;
+          await streamToRun({
+            run: p.run,
+            proc: retrySpawned.proc!,
+            parser: retryPrep.parser,
+            agentName: p.name,
+            preGen: retryPrep.preGen,
+            sessionId: retryPrep.sessionId,
+            verbose: sessionStateRef.current.verbose,
+          });
         }),
       );
 
-      for (const r of runs) r.liveMaxLines = null;
+      // Uncap structured parsers (codex-json, cursor-json, raw with a clean
+      // CLI) so their final answer renders fully. Keep the live-preview cap
+      // on for noisy plain-text parsers (agy-text) so the panel doesn't
+      // expand to dump the full intermediate transcript when the run ends.
+      for (const p of prepared) {
+        if (p.spec.parser !== "agy-text") p.run.liveMaxLines = null;
+      }
       activeProcsRef.current = [];
 
       for (const p of prepared) {
@@ -222,7 +311,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       sessionStateRef.current.lastStatus =
         okCount === prepared.length ? `✓×${okCount}` : `${okCount}/${prepared.length} ok`;
 
-      const completed: CompletedTurn = { id: nextId(), prompt: userPrompt, runs };
+      const completed: CompletedTurn = {
+        id: nextId(),
+        prompt: userPrompt,
+        runs,
+        task: currentTask(),
+        at: new Date(),
+      };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
       setActiveRuns([]);
       setActivePromptText(null);
@@ -232,8 +327,25 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           await appendTurn(p.name, userPrompt, p.run.responseChunks.join(""));
         }
       }
+
+      // One dim hint line for every agent in this fanout that completed cleanly
+      // AND has an open_template (i.e. is actually resumable). Mirrors the
+      // single-agent hint shape so the affordance discovery is consistent.
+      const openable = prepared
+        .filter(
+          (p) =>
+            !p.spawned.error &&
+            !p.run.cancelled &&
+            !p.run.interrupted &&
+            p.run.finalStatus === "done" &&
+            Boolean(p.spec.open_template),
+        )
+        .map((p) => `/open ${p.name}`);
+      if (openable.length > 0) {
+        log(`continue any session:  ${openable.join("  ·  ")}`);
+      }
     },
-    [agentColor, config.agents],
+    [agentColor, config.agents, log],
   );
 
   const handleSlash = useCallback(
@@ -500,11 +612,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           const unavail = unavailableAgentReasons(config.agents);
           const skipped = agents.filter((n) => unavail[n]);
           if (skipped.length) {
-            log(
-              `@all skipping unavailable CLI agent(s): ${skipped
-                .map((n) => `@${n} (${unavail[n]})`)
-                .join(", ")}`,
-            );
+            // Render as an aligned column block, one agent per line. Easier
+            // to scan than a comma-joined run-on sentence.
+            const nameWidth = Math.max(...skipped.map((n) => n.length + 1));
+            const rows = skipped
+              .map((n) => `   @${n.padEnd(nameWidth)}  ${unavail[n]}`)
+              .join("\n");
+            log(`@all skipped:\n${rows}`);
           }
           if (available.length === 0) {
             log("no available CLI agents for @all", "yellow");
@@ -577,6 +691,23 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           log(`@${agent} is disabled. Run /agents enable ${agent} to use it.`, "yellow");
           return;
         }
+        // If the user wrote other known @<agent> mentions in the prompt body
+        // but they didn't shape it as multi-dispatch ("@a @b hi" / "@a and @b hi"),
+        // surface a one-line hint so the silent single-dispatch isn't mistaken
+        // for a parallel one. Catches things like
+        //   "@claude please ask @codex about X"  →  routes to claude only.
+        const otherMentions = new Set<string>();
+        for (const m of parsed.content.matchAll(/@([A-Za-z0-9_\-]+)/g)) {
+          const n = m[1]!;
+          if (n !== agent && config.agents[n]) otherMentions.add(n);
+        }
+        if (otherMentions.size > 0) {
+          const others = [...otherMentions].map((n) => `@${n}`).join(", ");
+          log(
+            `routing to @${agent}. ${others} also mentioned — use ` +
+              `@${agent} ${[...otherMentions].map((n) => `@${n}`).join(" ")} <prompt> for parallel dispatch.`,
+          );
+        }
         const { images: extracted, cleaned } = extractImagePaths(parsed.content);
         const allImages = [...state.pendingImages, ...extracted];
         if (!cleaned.trim() && allImages.length === 0) {
@@ -615,26 +746,50 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   return (
     <Box flexDirection="column">
       <Static items={history}>
-        {(item) =>
-          item.kind === "log" ? (
-            <Text key={item.line.id} color={item.line.color}>
-              {item.line.text}
-            </Text>
-          ) : (
+        {(item, index) => {
+          if (item.kind === "log") {
+            return (
+              <Text key={item.line.id} color={item.line.color}>
+                {item.line.text}
+              </Text>
+            );
+          }
+          // Determine if a separator belongs above this turn — and how heavy.
+          // None for the very first turn ever, single `─` between turns in the
+          // same task, double `═` when the task changed.
+          let prevTurn: CompletedTurn | null = null;
+          for (let i = index - 1; i >= 0; i--) {
+            const it = history[i];
+            if (it && it.kind === "turn") {
+              prevTurn = it.turn;
+              break;
+            }
+          }
+          const sepKind: "none" | "single" | "double" = !prevTurn
+            ? "none"
+            : prevTurn.task !== item.turn.task
+              ? "double"
+              : "single";
+          const label = formatClockLabel(item.turn);
+          return (
             <Box key={item.turn.id} flexDirection="column">
+              {sepKind !== "none" && <Separator kind={sepKind} label={label} />}
               <UserPrompt prompt={item.turn.prompt} />
-              {item.turn.runs.map((r) => (
-                <AgentPanel key={`${item.turn.id}-${r.agentName}`} run={r} tick={0} />
-              ))}
+              <PanelRow runs={item.turn.runs} tick={0} keyPrefix={item.turn.id} />
             </Box>
-          )
-        }
+          );
+        }}
       </Static>
       {activePromptText !== null && <UserPrompt prompt={activePromptText} />}
-      {activeRuns.map((r) => (
-        <AgentPanel key={`live-${r.agentName}`} run={r} tick={tick} />
-      ))}
-      <PromptInput value={input} onChange={setInput} onSubmit={handleSubmit} disabled={busy} />
+      <PanelRow runs={activeRuns} tick={tick} keyPrefix="live" />
+      <MultilineInput
+        value={input}
+        onChange={setInput}
+        onSubmit={handleSubmit}
+        disabled={busy}
+        slashCommands={SLASH_COMMANDS}
+        agents={agents}
+      />
       <BottomToolbar state={toolbarState} />
     </Box>
   );

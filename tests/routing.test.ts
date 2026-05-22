@@ -34,6 +34,30 @@ describe("parseMulti", () => {
   it("returns null on a single mention", () => {
     expect(parseMulti("@a go", ["a"])).toBeNull();
   });
+
+  it("accepts 'and' between leading mentions", () => {
+    const r = parseMulti("@a and @b hi", ["a", "b"]);
+    expect(r).toEqual({ agents: ["a", "b"], body: "hi" });
+  });
+
+  it("accepts a comma between leading mentions", () => {
+    const r = parseMulti("@a, @b hi", ["a", "b"]);
+    expect(r).toEqual({ agents: ["a", "b"], body: "hi" });
+  });
+
+  it("accepts '+' between leading mentions with no whitespace", () => {
+    const r = parseMulti("@a+@b hi", ["a", "b"]);
+    expect(r).toEqual({ agents: ["a", "b"], body: "hi" });
+  });
+
+  it("treats 'and' as a connector only when followed by whitespace or @", () => {
+    // "android" shouldn't be eaten as connector + suffix.
+    expect(parseMulti("@a android @b hi", ["a", "b"])).toBeNull();
+  });
+
+  it("does not multi-dispatch when leading text precedes the mentions", () => {
+    expect(parseMulti("and @a @b hi", ["a", "b"])).toBeNull();
+  });
 });
 
 describe("smartRoute", () => {

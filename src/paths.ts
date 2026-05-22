@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +20,42 @@ export function scriptDir(): string {
   return path.resolve(here, "..");
 }
 
-export const CONFIG_PATH = path.join(scriptDir(), "agents.json");
+export const DEFAULT_CONFIG_PATH = path.join(scriptDir(), "agents.json");
+
+type ConfigPathOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  homeDir?: string;
+};
+
+export function expandHome(p: string, homeDir = os.homedir()): string {
+  if (p === "~") return homeDir;
+  if (p.startsWith("~/")) return path.join(homeDir, p.slice(2));
+  return p;
+}
+
+export function configHome(options: Pick<ConfigPathOptions, "env" | "homeDir"> = {}): string {
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const xdgConfigHome = env.XDG_CONFIG_HOME?.trim();
+  if (xdgConfigHome) return path.join(expandHome(xdgConfigHome, homeDir), "relevo");
+  return path.join(homeDir, ".config", "relevo");
+}
+
+export function resolveConfigPath(options: ConfigPathOptions = {}): string {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const explicit = env.RELEVO_CONFIG?.trim();
+  if (explicit) return expandHome(explicit, homeDir);
+
+  const local = path.join(cwd, "agents.json");
+  if (existsSync(local)) return local;
+
+  return path.join(configHome({ env, homeDir }), "agents.json");
+}
+
+export const CONFIG_PATH = resolveConfigPath();
 
 export function projectDir(): string {
   return process.cwd();

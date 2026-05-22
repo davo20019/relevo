@@ -1,11 +1,43 @@
 {
   "agents": {
-    "claude":      { "cmd": "claude -p --dangerously-skip-permissions {prompt}", "init_template": "claude -p --session-id {session_id} --dangerously-skip-permissions {prompt}", "resume_template": "claude -p --resume {session_id} --dangerously-skip-permissions {prompt}", "open_template": "claude --resume {session_id}", "pre_generate_id": "uuid" },
-    "codex":       { "cmd": "codex exec -c sandbox_mode=workspace-write --skip-git-repo-check --json --color never {prompt}", "resume_template": "codex exec resume -c sandbox_mode=workspace-write --skip-git-repo-check --json {session_id} {prompt}", "open_template": "codex resume {session_id}", "parser": "codex-json" },
-    "cursor":      { "enabled": false, "cmd": "agent -p --force --model auto --output-format stream-json {prompt}", "init_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}", "resume_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}", "open_template": "agent --resume {session_id}", "pre_generate_id": "uuid", "parser": "cursor-json" },
-    "opencode":    { "enabled": false, "cmd": "opencode run {prompt}" },
-    "pi":          { "cmd": "pi -p {prompt}" },
-    "agy":         { "cmd": "agy --dangerously-skip-permissions -p {prompt}", "resume_template": "agy --conversation {session_id} --dangerously-skip-permissions -p {prompt}", "open_template": "agy --conversation {session_id}", "session_id_from_dir": "~/.gemini/antigravity-cli/conversations", "session_id_strip_ext": ".pb", "parser": "agy-text" }
+    "claude": {
+      "cmd": "claude -p --dangerously-skip-permissions {prompt}",
+      "init_template": "claude -p --session-id {session_id} --dangerously-skip-permissions {prompt}",
+      "resume_template": "claude -p --resume {session_id} --dangerously-skip-permissions {prompt}",
+      "open_template": "claude --resume {session_id}",
+      "pre_generate_id": "uuid"
+    },
+    "codex": {
+      "cmd": "codex exec -c sandbox_mode=workspace-write --skip-git-repo-check --json --color never {prompt}",
+      "resume_template": "codex exec resume -c sandbox_mode=workspace-write --skip-git-repo-check --json {session_id} {prompt}",
+      "open_template": "codex resume {session_id}",
+      "parser": "codex-json"
+    },
+    "cursor": {
+      "enabled": false,
+      "cmd": "agent -p --force --model auto --output-format stream-json {prompt}",
+      "init_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+      "resume_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+      "open_template": "agent --resume {session_id}",
+      "pre_generate_id": "uuid",
+      "parser": "cursor-json"
+    },
+    "opencode": {
+      "enabled": false,
+      "cmd": "opencode run {prompt}"
+    },
+    "pi": {
+      "cmd": "pi -p {prompt}"
+    },
+    "agy": {
+      "cmd": "agy --dangerously-skip-permissions -p {prompt}",
+      "resume_template": "agy --conversation {session_id} --dangerously-skip-permissions -p {prompt}",
+      "open_template": "agy --conversation {session_id}",
+      "session_id_from_dir": "~/.gemini/antigravity-cli/conversations",
+      "session_id_strip_ext": ".pb",
+      "parser": "agy-text",
+      "enabled": false
+    }
   },
   "context_turns": 3
 }
