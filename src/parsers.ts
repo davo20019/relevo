@@ -159,7 +159,22 @@ const AGY_PLAN_PREFIXES = [
   "Invoking ",
 ];
 
-export function parserCursorJson(line: string): ParseResult {
+function extractCursorUsage(usageObj: any): ParseResult | null {
+  if (!usageObj || typeof usageObj !== "object") return null;
+  // Cursor's terminal result.usage (undocumented; camelCase). Components are
+  // additive like Claude, not gross-minus-cache like Codex.
+  const input = Number(usageObj.inputTokens ?? 0);
+  const output = Number(usageObj.outputTokens ?? 0);
+  const cacheRead = Number(usageObj.cacheReadTokens ?? 0);
+  const cacheCreate = Number(usageObj.cacheWriteTokens ?? 0);
+  if (!input && !output && !cacheRead && !cacheCreate) return null;
+  return {
+    kind: "usage",
+    payload: JSON.stringify({ input, output, cacheRead, cacheCreate }),
+  };
+}
+
+export function parserCursorJson(line: string): ParseResult | ParseResult[] {
   // Filter Cursor's --output-format stream-json into typed events.
   const stripped = line.trim();
   if (!stripped) return NULL;
@@ -204,13 +219,16 @@ export function parserCursorJson(line: string): ParseResult {
     return NULL;
   }
   if (t === "result") {
-    const text = evt?.result ?? "";
-    if (text) return { kind: "message", payload: text + "\n\n" };
+    const results: ParseResult[] = [];
     if (evt?.is_error) {
-      const msg = evt?.error ?? evt?.message ?? `error (${sub || "unknown"})`;
-      return { kind: "message", payload: `[error] ${msg}\n` };
+      const msg = evt?.result ?? evt?.error ?? evt?.message ?? `error (${sub || "unknown"})`;
+      results.push({ kind: "message", payload: `[error] ${msg}\n` });
     }
-    return NULL;
+    // Success text is already streamed via `assistant` events; re-emitting
+    // result.result would duplicate the full answer in the panel.
+    const usage = extractCursorUsage(evt?.usage);
+    if (usage) results.push(usage);
+    return results.length ? results : NULL;
   }
   return NULL;
 }

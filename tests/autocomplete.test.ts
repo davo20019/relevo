@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applySuggestion,
   filterSuggestions,
+  slashCommandComplete,
   tokenUnderCursor,
 } from "../src/ui/autocomplete.js";
 
@@ -111,6 +112,25 @@ describe("slash-arg detection", () => {
     const t = tokenUnderCursor(v, v.length)!;
     const { value } = applySuggestion(v, t, "claude");
     expect(value).toBe("/agents enable claude ");
+  });
+});
+
+describe("slashCommandComplete", () => {
+  const agents = ["claude", "codex", "cursor", "opencode", "agy"];
+
+  it("returns true when /agents disable <agent> is fully specified", () => {
+    expect(slashCommandComplete("/agents disable opencode", agents)).toBe(true);
+    expect(slashCommandComplete("/agents enable @claude", agents)).toBe(true);
+  });
+
+  it("returns false for bare /agents or missing agent name", () => {
+    expect(slashCommandComplete("/agents", agents)).toBe(false);
+    expect(slashCommandComplete("/agents disable", agents)).toBe(false);
+    expect(slashCommandComplete("/agents disable ", agents)).toBe(false);
+  });
+
+  it("returns false for unknown agent names", () => {
+    expect(slashCommandComplete("/agents disable not-an-agent", agents)).toBe(false);
   });
 });
 

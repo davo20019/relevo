@@ -16,9 +16,9 @@
     },
     "cursor": {
       "enabled": true,
-      "cmd": "agent -p --force --model auto --output-format stream-json {prompt}",
-      "init_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
-      "resume_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+      "cmd": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps {prompt}",
+      "init_template": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
+      "resume_template": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
       "open_template": "agent --resume {session_id}",
       "pre_generate_id": "uuid",
       "parser": "cursor-json"
@@ -40,5 +40,10 @@
       "enabled": false
     }
   },
-  "context_turns": 3
+  "context_turns": 3,
+  "context_compaction": {
+    "enabled": true,
+    "maxCharsPerBlock": 24000,
+    "maxLineLength": 700
+  }
 }

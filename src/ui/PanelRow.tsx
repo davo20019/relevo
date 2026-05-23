@@ -1,5 +1,4 @@
-import { Box, useStdout } from "ink";
-import { useEffect, useState } from "react";
+import { Box } from "ink";
 import { AgentPanel } from "./AgentPanel.js";
 import type { AgentRunState } from "../run.js";
 
@@ -16,12 +15,13 @@ export function PanelRow({
   runs,
   tick,
   keyPrefix,
+  cols,
 }: {
   runs: AgentRunState[];
   tick: number;
   keyPrefix: string;
+  cols: number;
 }) {
-  const cols = useTerminalColumns();
   if (runs.length === 0) return null;
 
   const maxPerRow = Math.max(1, Math.floor(cols / MIN_WIDTH_PER_PANEL));
@@ -52,18 +52,4 @@ export function PanelRow({
       ))}
     </Box>
   );
-}
-
-function useTerminalColumns(): number {
-  const { stdout } = useStdout();
-  const [cols, setCols] = useState<number>(stdout?.columns ?? 80);
-  useEffect(() => {
-    if (!stdout) return;
-    const update = () => setCols(stdout.columns ?? 80);
-    stdout.on("resize", update);
-    return () => {
-      stdout.off("resize", update);
-    };
-  }, [stdout]);
-  return cols;
 }

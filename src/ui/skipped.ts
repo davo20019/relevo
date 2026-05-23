@@ -27,42 +27,25 @@ export function buildSkippedBlock(
   }
 
   const anyDisabled = groups.has("disabled");
-  const hintText = anyDisabled
-    ? groups.size === 1
-      ? "  enable with /agents enable <name>"
-      : "  enable disabled agents with /agents enable <name>"
-    : null;
-  const hintLine: SkippedLine | null = hintText
-    ? [{ kind: "hint", text: hintText }]
-    : null;
 
-  const lines: SkippedLine[] = [];
-
-  if (groups.size === 1) {
-    const [reason] = [...groups.keys()];
-    const head: SkippedLine = [{ kind: "text", text: `@all → skipped (${reason}):` }];
-    for (const name of skipped) {
-      head.push({ kind: "text", text: " " });
-      head.push({ kind: "agent", agent: name });
-    }
-    lines.push(head);
-    if (hintLine) lines.push(hintLine);
-    return lines;
-  }
-
-  lines.push([{ kind: "text", text: `@all → skipping ${skipped.length} agents` }]);
-  const reasonWidth = Math.max(...[...groups.keys()].map((r) => r.length));
+  const row: SkippedLine = [
+    { kind: "text", text: `@all → ${skipped.length} skipped (` },
+  ];
+  let firstGroup = true;
   for (const [reason, names] of groups) {
-    const padded = reason.padEnd(reasonWidth);
-    const row: SkippedLine = [{ kind: "text", text: `  ${padded}  ` }];
-    names.forEach((name, idx) => {
-      if (idx > 0) row.push({ kind: "text", text: " " });
+    if (!firstGroup) row.push({ kind: "text", text: ", " });
+    firstGroup = false;
+    row.push({ kind: "text", text: reason });
+    for (const name of names) {
+      row.push({ kind: "text", text: " " });
       row.push({ kind: "agent", agent: name });
-    });
-    lines.push(row);
+    }
   }
-  if (hintLine) lines.push(hintLine);
-  return lines;
+  row.push({ kind: "text", text: ")" });
+  if (anyDisabled) {
+    row.push({ kind: "hint", text: " · /agents enable <name>" });
+  }
+  return [row];
 }
 
 export function skippedToText(lines: SkippedLine[]): string {

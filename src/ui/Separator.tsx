@@ -1,5 +1,4 @@
-import { Box, Text, useStdout } from "ink";
-import { useEffect, useState } from "react";
+import { Box, Text } from "ink";
 
 // Full-width horizontal rule, optionally with a label embedded near the left:
 //   ─── 10:53:14 ─────────────────────────────────────
@@ -8,11 +7,12 @@ import { useEffect, useState } from "react";
 export function Separator({
   kind = "single",
   label,
+  cols,
 }: {
   kind?: "single" | "double";
   label?: string;
+  cols: number;
 }) {
-  const cols = useTerminalColumns();
   const char = kind === "double" ? "═" : "─";
   const total = Math.max(0, cols);
 
@@ -36,18 +36,4 @@ export function Separator({
       </Text>
     </Box>
   );
-}
-
-function useTerminalColumns(): number {
-  const { stdout } = useStdout();
-  const [cols, setCols] = useState<number>(stdout?.columns ?? 80);
-  useEffect(() => {
-    if (!stdout) return;
-    const update = () => setCols(stdout.columns ?? 80);
-    stdout.on("resize", update);
-    return () => {
-      stdout.off("resize", update);
-    };
-  }, [stdout]);
-  return cols;
 }

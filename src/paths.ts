@@ -95,6 +95,16 @@ export function historyFile(): string {
   return path.join(stateDir(), "history");
 }
 
+export function projectSettingsFile(): string {
+  return path.join(stateDir(), "settings.json");
+}
+
+export function globalSettingsFile(
+  options: Pick<ConfigPathOptions, "env" | "homeDir"> = {},
+): string {
+  return path.join(configHome(options), "settings.json");
+}
+
 export function imagesDir(): string {
   return path.join(taskRoot(), "images");
 }

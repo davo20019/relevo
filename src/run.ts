@@ -104,9 +104,20 @@ function formatNum(n: number): string {
 
 function formatTokens(t: TokenUsage | null): string {
   if (!t) return "";
-  const totalIn = t.input + t.cacheRead + t.cacheCreate;
-  if (!totalIn && !t.output) return "";
-  return `${formatNum(totalIn)} in / ${formatNum(t.output)} out`;
+  // "fresh" includes cache writes since the model still processes them cold
+  // (and they bill at >=1x input). "cached" is cacheRead only — those are the
+  // reused tokens billed at ~10%, so splitting them out tells the real cost
+  // story instead of a single inflated total.
+  const fresh = t.input + t.cacheCreate;
+  const cached = t.cacheRead;
+  if (!fresh && !cached && !t.output) return "";
+  const inPart =
+    fresh && cached
+      ? `${formatNum(fresh)} + ${formatNum(cached)} cached in`
+      : cached
+        ? `${formatNum(cached)} cached in`
+        : `${formatNum(fresh)} in`;
+  return `${inPart} / ${formatNum(t.output)} out`;
 }
 
 // Latest one-line preview of what the agent is doing, or null if there's
@@ -136,6 +147,21 @@ export function hiddenLines(run: AgentRunState): number {
   if (!run.liveMaxLines || run.liveMaxLines <= 0) return 0;
   const lines = run.displayChunks.join("").split("\n");
   return Math.max(0, lines.length - run.liveMaxLines);
+}
+
+// Live preview height scales with terminal rows so tall windows show more
+// context per panel. Capped at 24 so very tall screens don't make a single
+// dispatch eat the whole transcript area and scroll the panel border off-screen.
+export function computeLiveMaxLines(rows?: number): number {
+  const height = rows ?? process.stdout.rows ?? 30;
+  return Math.max(8, Math.min(24, Math.floor(height / 3)));
+}
+
+// Uncap structured parsers so the final answer renders fully in scrollback.
+// Keep the live-preview cap on for noisy plain-text parsers (agy-text) so the
+// panel doesn't expand to dump the full intermediate transcript when the run ends.
+export function finalizeLivePreview(run: AgentRunState, parser: string | undefined): void {
+  if (parser !== "agy-text") run.liveMaxLines = null;
 }
 
 type PreparedCommand = {

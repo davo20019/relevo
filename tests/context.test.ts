@@ -39,16 +39,76 @@ describe("buildContext", () => {
   };
   const pi: AgentSpec = { cmd: "pi -p {prompt}" };
 
-  it("includes only the last peer turn by default", () => {
+  it("does not include peer turns by default", () => {
     writeTranscript("claude", [
       turn("2026-01-01T00:00:00", "old prompt", "old response"),
       turn("2026-01-02T00:00:00", "latest prompt", "latest response"),
     ]);
     const ctx = buildContext("codex", { claude, codex: { cmd: "codex" } }, 3);
+    expect(ctx).toBe("");
+  });
+
+  it("includes only requested peer turns", () => {
+    writeTranscript("claude", [
+      turn("2026-01-01T00:00:00", "old prompt", "old response"),
+      turn("2026-01-02T00:00:00", "latest prompt", "latest response"),
+    ]);
+    writeTranscript("cursor", [turn("2026-01-02T00:00:00", "cursor prompt", "cursor response")]);
+    const ctx = buildContext(
+      "codex",
+      { claude, codex: { cmd: "codex" }, cursor: { cmd: "cursor" } },
+      3,
+      { peerAgents: ["claude"] },
+    );
     expect(ctx).toContain("latest prompt");
     expect(ctx).toContain("latest response");
     expect(ctx).not.toContain("old prompt");
     expect(ctx).not.toContain("old response");
+    expect(ctx).not.toContain("cursor prompt");
+  });
+
+  it("does not mark ordinary recent activity as compacted", () => {
+    writeTranscript("pi", [turn("2026-01-01T00:00:00", "ordinary prompt", "ordinary response")]);
+    const ctx = buildContext("pi", { pi }, 1);
+
+    expect(ctx).toContain("ordinary prompt");
+    expect(ctx).toContain("ordinary response");
+    expect(ctx).not.toContain("[relevo compacted");
+  });
+
+  it("compacts oversized recent activity when requested", () => {
+    const noisy = Array.from({ length: 40 }, (_, i) => `line ${i + 1}: ${"x".repeat(80)}`).join(
+      "\n",
+    );
+    writeTranscript("pi", [turn("2026-01-01T00:00:00", "inspect output", noisy)]);
+    const ctx = buildContext("pi", { pi }, 1, {
+      contextCompaction: {
+        enabled: true,
+        maxCharsPerBlock: 900,
+        maxLineLength: 120,
+      },
+    });
+
+    expect(ctx).toContain("## Turn 2026-01-01T00:00:00");
+    expect(ctx).toContain("### Prompt");
+    expect(ctx).toContain("inspect output");
+    expect(ctx).toContain("[relevo compacted");
+    expect(ctx.length).toBeLessThan(noisy.length);
+  });
+
+  it("leaves recent activity unchanged when compaction is disabled", () => {
+    const response = `first\n${"x".repeat(300)}\nlast`;
+    writeTranscript("pi", [turn("2026-01-01T00:00:00", "short prompt", response)]);
+    const ctx = buildContext("pi", { pi }, 1, {
+      contextCompaction: {
+        enabled: false,
+        maxCharsPerBlock: 100,
+        maxLineLength: 40,
+      },
+    });
+
+    expect(ctx).toContain(response);
+    expect(ctx).not.toContain("[relevo compacted");
   });
 
   it("uses context_turns for the target agent without a native session", () => {

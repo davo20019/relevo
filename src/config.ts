@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { ContextCompactionConfig } from "./compaction.js";
 import which from "./which.js";
 import { CONFIG_PATH } from "./paths.js";
 
@@ -18,6 +19,7 @@ export type AgentSpec = {
 export type AgentConfig = {
   agents: Record<string, AgentSpec>;
   context_turns: number;
+  context_compaction?: ContextCompactionConfig;
 };
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -44,12 +46,13 @@ export const DEFAULT_CONFIG: AgentConfig = {
       parser: "codex-json",
     },
     cursor: {
-      // New Cursor CLI binary is `agent` (replaces the older `cursor-agent`).
-      cmd: "agent -p --force --model auto --output-format stream-json {prompt}",
+      // Headless Cursor agent: --force (run tools), --sandbox disabled + --trust (workspace access),
+      // --approve-mcps (unattended MCP), matching the automation level of claude/codex defaults.
+      cmd: "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps {prompt}",
       init_template:
-        "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+        "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
       resume_template:
-        "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+        "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
       open_template: "agent --resume {session_id}",
       pre_generate_id: "uuid",
       parser: "cursor-json",
@@ -69,6 +72,11 @@ export const DEFAULT_CONFIG: AgentConfig = {
     },
   },
   context_turns: 3,
+  context_compaction: {
+    enabled: true,
+    maxCharsPerBlock: 24_000,
+    maxLineLength: 700,
+  },
 };
 
 // 24-bit hex colors so the palette reads as deliberate and technical rather
@@ -155,7 +163,7 @@ export function unavailableAgentReasons(
     }
     const cmd = agentCommandName(spec);
     if (!cmd) reasons[name] = "no command";
-    else if (!whichFn(cmd)) reasons[name] = `missing command: ${cmd}`;
+    else if (!whichFn(cmd)) reasons[name] = "not installed";
   }
   return reasons;
 }

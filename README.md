@@ -8,9 +8,14 @@ others as context, and you can fan a prompt out to several agents in parallel.
 ## Why
 
 You finish a task with one agent, want another to review it, take the feedback
-back to the first, and then compare their answers. Today that usually means
-juggling terminal windows and copy-pasting. This wraps the CLIs you already have
-installed, using their existing logins and no API keys, and lets you say:
+back to the first, and compare answers. Today that usually means juggling
+terminals and copy-pasting context.
+
+Relevo wraps the headless modes of the CLIs you already use (same logins, no
+API keys). You route explicitly with `@mentions`, each agent runs in your
+project directory, and turns are written under `.relay/` so the next agent gets
+structured handoff context—not a pasted chat log. When you want the normal
+interactive CLI, `/open <agent>` continues the native session in a new window.
 
 ```
 > @claude @codex review the API design
@@ -38,6 +43,28 @@ Other CLIs such as Gemini or Aider can be added by editing `agents.json`.
 You log into each CLI normally once. relevo just shells out, so your
 existing auth is reused.
 
+## Automation defaults
+
+Headless multi-agent dispatch cannot block on per-tool approval dialogs in each
+pane. Built-in `agents.json` therefore uses each CLI's documented unattended
+flags (`-p`, `exec`, `run`, and similar) so `@` mentions and parallel fan-out
+keep moving. Tool permissions are effectively **pre-approved** on those paths;
+you remain the operator—edit templates in `agents.json` if you want prompts
+back.
+
+| Agent | Unattended behavior (summary) |
+|---|---|
+| `claude` | Skips permission prompts (`--dangerously-skip-permissions`) |
+| `codex` | Workspace-write sandbox; edits allowed in the project |
+| `cursor` | Applies edits, sandbox off, MCPs approved (`--force`, `--trust`, `--approve-mcps`) |
+| `opencode` | Non-interactive `run`; auto-approves permissions |
+| `agy` | Skips permission prompts (`--dangerously-skip-permissions`) |
+| `pi` | Headless `-p` only; no extra automation flags in relevo defaults |
+
+Edit `~/.config/relevo/agents.json`, a project-local `./agents.json`, or
+`RELEVO_CONFIG` to run agents in a more cautious mode. Per-flag notes and
+revert examples are in [Default Agent Notes](#default-agent-notes).
+
 ## Quickstart
 
 ```bash
@@ -47,8 +74,9 @@ npm i -g relevo && relevo
 ```
 
 First run creates `~/.config/relevo/agents.json` with six agents wired up:
-`claude`, `codex`, `cursor`, `opencode`, `agy` (Antigravity), and `pi`. Type
-`/help` inside the REPL.
+`claude`, `codex`, `cursor`, `opencode`, `agy` (Antigravity), and `pi`. Those
+defaults use the [automation flags above](#automation-defaults). Type `/help`
+inside the REPL.
 
 ### From source
 
@@ -80,10 +108,13 @@ npm run dev   # or: npm run build && npm start
   to `@codex review this`.
 - If you submit a prompt without an agent tag, relevo keeps it pending and
   asks you to pick an agent. Type `@codex` or another agent tag to send that
-  saved prompt.
-- The last turn from each other agent is prepended as handoff context. For agents
-  without native sessions, up to `context_turns` (default 3) of their own prior
-  turns are also included.
+  saved prompt. Use `/focus <agent>` to set a global default recipient so
+  untagged prompts go there in every future session. Use `/focus local <agent>`
+  for a per-project override in `.relay/settings.json`.
+- Other agents' turns are not prepended by default. Mention a peer agent in the
+  prompt when you want handoff context, such as
+  `@claude review @codex response`. For agents without native sessions, up to
+  `context_turns` (default 3) of their own prior turns are still included.
 - Each agent runs in your current working directory, exactly as if you had typed
   the CLI command directly. They share files in that directory.
 - Per-project state lives in `./.relay/`. Add it to your project's `.gitignore`.
@@ -107,9 +138,9 @@ One relevo terminal represents one task. Agents inside that terminal share the
 same working directory and task transcripts. Use `@agent` mentions to route
 prompts to one or more collaborators in that task.
 
-Relevo keeps chronological scrollback as the source of truth. `/focus <agent>`
-narrows live output while a run is active, but historical output remains in the
-normal task scrollback.
+Relevo keeps chronological scrollback as the source of truth. `/focus` sets the
+default recipient for untagged prompts (global and optional per-project); explicit
+`@other` mentions still override for that line without changing focus.
 
 ## Worktrees
 
@@ -137,16 +168,20 @@ relevo
 | `/agents disable <agent>` | disable an agent for `@all` |
 | `/last <agent>` | show that agent's most recent turn |
 | `/tail <agent> [n]` | show the last n turns from that agent |
-| `/clear` | wipe transcripts for the current task |
-| `/reset` | wipe transcripts and saved native sessions for the current task |
+| `/clear` | wipe transcripts and saved native sessions for the current task |
+| `/reset` | same as `/clear` |
 | `/task` | show the current task |
 | `/task list` | list tasks |
 | `/task new <name>` | create and switch to a task |
 | `/task rename <new>` | rename the current task |
 | `/resume` | list recent tasks; `/resume <n>` switches to one |
 | `/open <agent>` | open a resumable native session in a new terminal window |
-| `/focus <agent>` | show only one agent's live output |
-| `/focus` | show all live output |
+| `/focus <agent>` | set global default recipient (all projects, future sessions) |
+| `/focus global <agent>` | same as `/focus <agent>` |
+| `/focus local <agent>` | project override in `.relay/settings.json` |
+| `/focus session <agent>` | temporary override until quit |
+| `/focus` | show global, project, and active default |
+| `/focus clear [global\|local\|session]` | clear saved or session default |
 | `/sync [@agents...]` | reserved for task-state rebroadcasting; not implemented yet |
 | `/image <path>` | queue an image file for the next dispatch |
 | `/image paste` | queue the clipboard image, requires `pngpaste` |
@@ -160,6 +195,8 @@ relevo
 
 You can also drag and drop an image file into your prompt. Existing image paths
 are extracted, attached to the next dispatch, and removed from the prompt text.
+Dropped or pasted images that need a stable path are copied to Relevo's OS
+cache directory and cleaned up on startup after 30 days.
 
 ## Configuration
 
@@ -187,9 +224,9 @@ generated defaults look like this:
       "parser": "codex-json"
     },
     "cursor": {
-      "cmd": "agent -p --force --model auto --output-format stream-json {prompt}",
-      "init_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
-      "resume_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
+      "cmd": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps {prompt}",
+      "init_template": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
+      "resume_template": "agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps --resume {session_id} {prompt}",
       "open_template": "agent --resume {session_id}",
       "pre_generate_id": "uuid",
       "parser": "cursor-json"
@@ -209,7 +246,12 @@ generated defaults look like this:
       "parser": "agy-text"
     }
   },
-  "context_turns": 3
+  "context_turns": 3,
+  "context_compaction": {
+    "enabled": true,
+    "maxCharsPerBlock": 24000,
+    "maxLineLength": 700
+  }
 }
 ```
 
@@ -248,22 +290,27 @@ To add another CLI, merge new entries into the existing `agents` object:
   command counts, edit counts, and session IDs. `agy-text` is a heuristic parser
   for Antigravity's text output.
 - `context_turns` controls how many of the target agent's own prior turns are
-  replayed when it has no active native session. Other agents always contribute
-  their latest turn only.
+  replayed when it has no active native session. Other agents contribute their
+  latest turn only when they are explicitly mentioned in the prompt, such as
+  `@claude compare this with @codex`.
+- `context_compaction` trims oversized recent-activity blocks before they are
+  injected into a future dispatch. Full transcripts remain unchanged on disk.
 
 ## Default Agent Notes
+
+Per-agent detail for the [automation defaults](#automation-defaults) table:
 
 - `claude --dangerously-skip-permissions`: bypasses Claude Code permission
   prompts for unattended runs.
 - `codex -c sandbox_mode=workspace-write`: lets Codex edit the current project
   while keeping Codex's own sandboxing enabled. This form is used because it
   works for both fresh `codex exec` runs and `codex exec resume`.
-- `agent -p --force --model auto --output-format stream-json`: Cursor's new CLI
-  binary (replaces `cursor-agent`). Without `--force` it only proposes diffs;
-  `--model auto` is required on free plans. `--output-format stream-json` plus
-  the `cursor-json` parser keep default output quiet by hiding thinking deltas
-  and tool chatter, matching Codex/Claude behavior. Native session continuity
-  uses a pre-generated UUID via `--resume <id>`.
+- `agent -p --force --model auto --output-format stream-json --sandbox disabled --trust --approve-mcps`:
+  Cursor's new CLI binary (replaces `cursor-agent`). Without `--force` it only
+  proposes diffs; `--model auto` is required on free plans. `--sandbox disabled`,
+  `--trust`, and `--approve-mcps` mirror the unattended automation of Claude/Codex
+  defaults. `--output-format stream-json` plus the `cursor-json` parser keep output
+  quiet. Native session continuity uses a pre-generated UUID via `--resume <id>`.
 - `opencode run`: auto-approves permissions in non-interactive mode.
 - `agy --dangerously-skip-permissions -p`: Antigravity's headless print mode with
   auto-approved tool permissions. Flags must come BEFORE `-p` since agy parses
@@ -276,12 +323,15 @@ flag or switch Claude back to `--permission-mode acceptEdits`.
 
 - Native sessions are supported when the underlying CLI exposes a stable resume
   mechanism. Claude, Codex, Cursor, and agy are configured this way by default.
-- Transcript replay is still used as the cross-agent coordination mechanism.
-  Agents do not talk to each other directly.
-- Parallel dispatch starts every selected agent from the same pre-existing
-  transcript context. Their outputs become context for the next turn, not for
+- Transcript replay is still used as the cross-agent coordination mechanism,
+  but peer context is opt-in per prompt. Agents do not talk to each other
+  directly.
+- Parallel dispatch starts every selected agent from the same user prompt.
+  Their outputs become available for later explicit handoff prompts, not for
   each other during the same fanout.
-- Press `Esc` to cancel a running single-agent or parallel dispatch.
+- Press `Ctrl+C` to clear whatever you have typed in the prompt. Press `Ctrl+C`
+  twice within two seconds to quit (or use `/exit`).
+- Press `Esc` to cancel a running dispatch or clear a queued prompt.
 - If an agent's saved native session is no longer valid (the underlying CLI
   reports the session as expired or missing), relevo drops the stale session
   ID and automatically retries the call once with a fresh session. You'll see

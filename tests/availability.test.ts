@@ -36,7 +36,7 @@ describe("unavailableAgentReasons", () => {
     const w = (n: string) => (n === "ok-cli" ? "/bin/ok-cli" : null);
     const r = unavailableAgentReasons(specs, w);
     expect(r.off).toBe("disabled");
-    expect(r.gone).toContain("missing command");
+    expect(r.gone).toBe("not installed");
     expect(r.ok).toBeUndefined();
   });
 });

@@ -5,6 +5,7 @@ import {
   parseLine,
   parseMulti,
   prepareDispatchLine,
+  requestedPeerAgents,
   smartRoute,
 } from "../src/routing.js";
 
@@ -97,6 +98,20 @@ describe("prepareDispatchLine pending-prompt round-trip", () => {
     expect(state.pendingPrompt).toBe("review the latest diff");
   });
 
+  it("routes untagged input to the focused agent", () => {
+    const state = { pendingPrompt: null as string | null };
+    const routed = prepareDispatchLine("fix the tests", ["claude", "codex"], state, "claude");
+    expect(routed).toBe("@claude fix the tests");
+    expect(state.pendingPrompt).toBeNull();
+  });
+
+  it("explicit mentions override focus without changing routing prep", () => {
+    const state = { pendingPrompt: null as string | null };
+    const routed = prepareDispatchLine("@codex ship it", ["claude", "codex"], state, "claude");
+    expect(routed).toBe("@codex ship it");
+    expect(state.pendingPrompt).toBeNull();
+  });
+
   it("a bare agent mention consumes the saved untagged prompt", () => {
     const state = { pendingPrompt: "review the latest diff" as string | null };
     const routed = prepareDispatchLine("@claude", ["claude"], state);
@@ -116,5 +131,27 @@ describe("parseLine", () => {
       agent: "claude",
       content: "do X",
     });
+  });
+});
+
+describe("requestedPeerAgents", () => {
+  it("returns no peers for ordinary direct chat", () => {
+    expect(requestedPeerAgents("explain streams", "claude", ["claude", "codex"])).toEqual([]);
+  });
+
+  it("returns explicitly mentioned peer agents", () => {
+    expect(
+      requestedPeerAgents("review @codex response and compare @cursor:last", "claude", [
+        "claude",
+        "codex",
+        "cursor",
+      ]),
+    ).toEqual(["codex", "cursor"]);
+  });
+
+  it("does not include the target agent as peer context", () => {
+    expect(requestedPeerAgents("continue @claude and review @codex", "claude", ["claude", "codex"])).toEqual([
+      "codex",
+    ]);
   });
 });

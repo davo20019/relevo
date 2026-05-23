@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   activitySuffix,
+  computeLiveMaxLines,
+  displayText,
+  finalizeLivePreview,
+  hiddenLines,
   idleSeconds,
   lastActivityPreview,
   newRun,
@@ -31,6 +35,26 @@ describe("activitySuffix", () => {
     r.tokens = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
     expect(activitySuffix(r)).toBe("");
   });
+
+  it("splits fresh vs cached tokens so cache reads are visible", () => {
+    const r = newRun("a", "cyan", "p");
+    // turn 2-style: small new prompt, big cache hit on the system prompt
+    r.tokens = { input: 2000, output: 143, cacheRead: 33000, cacheCreate: 0 };
+    expect(activitySuffix(r)).toContain("2k + 33k cached in / 143 out");
+  });
+
+  it("treats cache writes as fresh since they bill at full price", () => {
+    const r = newRun("a", "cyan", "p");
+    // turn 1-style: no cache hits yet, system prompt is being written into cache
+    r.tokens = { input: 2000, output: 32, cacheRead: 0, cacheCreate: 30000 };
+    expect(activitySuffix(r)).toContain("32k in / 32 out");
+  });
+
+  it("drops the `+` when there's only cached input", () => {
+    const r = newRun("a", "cyan", "p");
+    r.tokens = { input: 0, output: 10, cacheRead: 5000, cacheCreate: 0 };
+    expect(activitySuffix(r)).toContain("5k cached in / 10 out");
+  });
 });
 
 describe("lastActivityPreview", () => {
@@ -46,6 +70,39 @@ describe("lastActivityPreview", () => {
 
   it("returns null when nothing has happened", () => {
     expect(lastActivityPreview(newRun("a", "cyan", "p"))).toBeNull();
+  });
+});
+
+describe("computeLiveMaxLines", () => {
+  it("scales with terminal height and stays within bounds", () => {
+    expect(computeLiveMaxLines(24)).toBe(8);
+    expect(computeLiveMaxLines(60)).toBe(20);
+    expect(computeLiveMaxLines(120)).toBe(24);
+  });
+});
+
+describe("live preview cap", () => {
+  it("shows only the tail while capped", () => {
+    const run = newRun("a", "cyan", "p", 3);
+    run.displayChunks = ["one\ntwo\nthree\nfour\nfive"];
+    expect(displayText(run)).toBe("three\nfour\nfive");
+    expect(hiddenLines(run)).toBe(2);
+  });
+
+  it("uncaps structured parsers when finalized", () => {
+    const run = newRun("a", "cyan", "p", 3);
+    run.displayChunks = ["one\ntwo\nthree\nfour\nfive"];
+    finalizeLivePreview(run, "claude-json");
+    expect(displayText(run)).toBe("one\ntwo\nthree\nfour\nfive");
+    expect(hiddenLines(run)).toBe(0);
+  });
+
+  it("keeps agy-text capped after finalize", () => {
+    const run = newRun("a", "cyan", "p", 3);
+    run.displayChunks = ["one\ntwo\nthree\nfour\nfive"];
+    finalizeLivePreview(run, "agy-text");
+    expect(displayText(run)).toBe("three\nfour\nfive");
+    expect(hiddenLines(run)).toBe(2);
   });
 });
 

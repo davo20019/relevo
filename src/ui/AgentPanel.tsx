@@ -14,9 +14,10 @@ import { renderMarkdown } from "./markdown.js";
 // ubiquitous braille spinner.
 const SPINNER_FRAMES = ["◜", "◝", "◞", "◟"];
 
-// 4-frame dot cycle for "waiting" / "running" labels. Padded so the line
-// width doesn't jitter as the dots grow.
+// 4-frame dot cycle for active labels. Padded so the line width doesn't jitter
+// as the dots grow.
 const DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
+const WAITING_PHRASES = ["thinking", "working", "checking", "reading"];
 
 type Status = "running" | "done" | "error" | "cancelled" | "interrupted";
 
@@ -141,6 +142,12 @@ export function AgentPanel({
 // genuinely wedged process gets surfaced before the user has to wonder.
 const IDLE_QUIET_SECONDS = 120;
 
+export function formatWaitingStatus(elapsed: number): string {
+  const phrase = WAITING_PHRASES[Math.floor(elapsed / 6) % WAITING_PHRASES.length]!;
+  const dots = DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
+  return `${phrase}${dots}`;
+}
+
 function WaitingLine({
   run,
   elapsed,
@@ -152,13 +159,13 @@ function WaitingLine({
 }) {
   const preview = lastActivityPreview(run);
   const idle = idleSeconds(run);
-  const dots = DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
+  const waitingStatus = formatWaitingStatus(elapsed);
   const maxPreviewWidth = width !== undefined ? Math.max(10, width - 4) : 200;
 
   if (!preview) {
     return (
       <Text dimColor>
-        waiting{dots}
+        {waitingStatus}
         {idle >= IDLE_QUIET_SECONDS && (
           <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
         )}
@@ -174,7 +181,7 @@ function WaitingLine({
     <>
       <Text dimColor>{shown}</Text>
       <Text dimColor>
-        ...working{dots.trimEnd()}
+        ...{waitingStatus.trimEnd()}
         {idle >= IDLE_QUIET_SECONDS && (
           <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
         )}

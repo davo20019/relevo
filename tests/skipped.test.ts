@@ -10,36 +10,33 @@ describe("buildSkippedBlock / skippedToText", () => {
     expect(text([], {})).toBe("");
   });
 
-  it("collapses single-reason 'disabled' to one line plus enable hint", () => {
-    expect(text(["cursor", "opencode", "pi"], {
-      cursor: "disabled",
-      opencode: "disabled",
-      pi: "disabled",
-    })).toBe(
-      "@all → skipped (disabled): @cursor @opencode @pi\n  enable with /agents enable <name>",
-    );
-  });
-
-  it("collapses single non-disabled reason to one line without hint", () => {
-    expect(text(["cursor"], { cursor: "no command" })).toBe(
-      "@all → skipped (no command): @cursor",
-    );
-  });
-
-  it("groups mixed reasons by reason with aligned columns + hint when any disabled", () => {
+  it("collapses single-reason 'disabled' to one line with inline enable hint", () => {
     expect(
       text(["cursor", "opencode", "pi"], {
         cursor: "disabled",
         opencode: "disabled",
-        pi: "missing command: pi",
+        pi: "disabled",
       }),
     ).toBe(
-      [
-        "@all → skipping 3 agents",
-        "  disabled             @cursor @opencode",
-        "  missing command: pi  @pi",
-        "  enable disabled agents with /agents enable <name>",
-      ].join("\n"),
+      "@all → 3 skipped (disabled @cursor @opencode @pi) · /agents enable <name>",
+    );
+  });
+
+  it("collapses single non-disabled reason to one line without hint", () => {
+    expect(text(["cursor"], { cursor: "not installed" })).toBe(
+      "@all → 1 skipped (not installed @cursor)",
+    );
+  });
+
+  it("inlines mixed reasons on one line with inline hint when any disabled", () => {
+    expect(
+      text(["cursor", "opencode", "pi"], {
+        cursor: "disabled",
+        opencode: "disabled",
+        pi: "not installed",
+      }),
+    ).toBe(
+      "@all → 3 skipped (disabled @cursor @opencode, not installed @pi) · /agents enable <name>",
     );
   });
 
@@ -47,21 +44,17 @@ describe("buildSkippedBlock / skippedToText", () => {
     expect(
       text(["a", "b"], {
         a: "no command",
-        b: "missing command: foo",
+        b: "not installed",
       }),
-    ).toBe(
-      [
-        "@all → skipping 2 agents",
-        "  no command            @a",
-        "  missing command: foo  @b",
-      ].join("\n"),
-    );
+    ).toBe("@all → 2 skipped (no command @a, not installed @b)");
   });
 
   it("preserves the input order of agents inside each reason group", () => {
     expect(
       text(["z", "a", "m"], { z: "disabled", a: "disabled", m: "disabled" }),
-    ).toBe("@all → skipped (disabled): @z @a @m\n  enable with /agents enable <name>");
+    ).toBe(
+      "@all → 3 skipped (disabled @z @a @m) · /agents enable <name>",
+    );
   });
 
   it("emits agent segments tagged with the agent name (for per-agent coloring)", () => {
@@ -77,9 +70,11 @@ describe("buildSkippedBlock / skippedToText", () => {
     ]);
   });
 
-  it("marks the trailing enable hint as 'hint' kind for dim rendering", () => {
+  it("marks the inline enable hint as 'hint' kind for dim rendering", () => {
     const lines = buildSkippedBlock(["x"], { x: "disabled" });
-    const last = lines[lines.length - 1]!;
-    expect(last.every((s) => s.kind === "hint")).toBe(true);
+    const onlyRow = lines[0]!;
+    const hintSegs = onlyRow.filter((s) => s.kind === "hint");
+    expect(hintSegs).toHaveLength(1);
+    expect((hintSegs[0] as { text: string }).text).toMatch(/\/agents enable/);
   });
 });

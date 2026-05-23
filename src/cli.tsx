@@ -6,6 +6,7 @@ import { App } from "./ui/App.js";
 import { ensureDirs, ensureDirsSync } from "./paths.js";
 import { loadConfig } from "./config.js";
 import { buildHelpText } from "./help.js";
+import { cleanupStagedImageCache } from "./images.js";
 
 // React/Ink emit performance.mark/measure entries on every render. Over a long
 // TUI session that fills Node's 1M global perf-entry buffer and triggers
@@ -36,9 +37,12 @@ async function main(): Promise<number> {
   }
 
   await ensureDirs();
+  cleanupStagedImageCache();
   const config = loadConfig((msg) => process.stderr.write(msg + "\n"));
 
-  const { waitUntilExit } = render(createElement(App, { initialConfig: config }));
+  const { waitUntilExit } = render(createElement(App, { initialConfig: config }), {
+    exitOnCtrlC: false,
+  });
   await waitUntilExit();
   return 0;
 }

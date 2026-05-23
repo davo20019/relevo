@@ -13,16 +13,23 @@ import {
 } from "../config.js";
 import { buildContext } from "../context.js";
 import { buildHelpText } from "../help.js";
-import { extractImagePaths, formatPromptWithImages, IMAGE_EXTS, pasteClipboardImage } from "../images.js";
+import {
+  extractImagePaths,
+  formatPromptForAgentImages,
+  formatPromptWithImages,
+  IMAGE_EXTS,
+  IMAGE_TOKEN,
+  pasteClipboardImage,
+  stageImagePaths,
+} from "../images.js";
 import { openInNewTerminal } from "../openWindow.js";
 import {
   ensureTask,
   projectDir,
-  transcriptDir,
 } from "../paths.js";
-import { clearAgentSession, clearSessions, loadSessions } from "../sessions.js";
+import { clearAgentSession, loadSessions } from "../sessions.js";
 import { appendTurn, readLastTurns } from "../transcripts.js";
-import { existsSync, readdirSync, unlinkSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import {
@@ -31,8 +38,11 @@ import {
   parseLine,
   parseMulti,
   prepareDispatchLine,
+  requestedPeerAgents,
 } from "../routing.js";
 import {
+  computeLiveMaxLines,
+  finalizeLivePreview,
   newRun,
   prepareCommand,
   resetRunForRetry,
@@ -44,15 +54,29 @@ import {
 } from "../run.js";
 import { classifySubmit, formatQueuePreview } from "../queue.js";
 import { appendPromptHistory, loadPromptHistory } from "../prompt-history.js";
+import {
+  focusClearMessage,
+  focusSetMessage,
+  formatFocusStatus,
+  loadPersistedFocus,
+  loadGlobalSettings,
+  loadProjectSettings,
+  parseFocusCommand,
+  resolveEffectiveFocus,
+  saveGlobalFocusAgent,
+  saveProjectFocusAgent,
+  type PersistedFocus,
+} from "../settings.js";
 import { BottomToolbar } from "./BottomToolbar.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { colorizeAgentMentions } from "./colorizeAgents.js";
-import { filterFocusedRuns } from "./focus.js";
 import { PanelRow } from "./PanelRow.js";
 import { Separator } from "./Separator.js";
 import { buildSkippedBlock, type SkippedLine } from "./skipped.js";
 import { SkippedBlock } from "./SkippedBlock.js";
+import { buildCompactDisplayPrompt, displayPromptFromDispatch } from "./promptDisplay.js";
 import { UserPrompt } from "./UserPrompt.js";
+import { clearTaskContext } from "../taskCleanup.js";
 import {
   createTaskDir,
   getActiveTask,
@@ -115,7 +139,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeRuns, setActiveRuns] = useState<AgentRunState[]>([]);
   const [input, setInput] = useState("");
-  const [focusAgent, setFocusAgent] = useState<string | null>(null);
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const lastCtrlCRef = useRef(0);
+  const [sessionFocusOverride, setSessionFocusOverride] = useState<string | null>(null);
+  const [persistedFocus, setPersistedFocus] = useState<PersistedFocus>(() => loadPersistedFocus());
   // Submitted-prompt history for the input's Up/Down recall. Loaded once from
   // disk on mount; appended whenever a non-empty line is submitted.
   const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory());
@@ -136,7 +164,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   // re-derived later when state may have shifted.
   type QueuedItem = {
     agent: string;
-    userPrompt: string;
+    cleaned: string;
+    peerAgents: string[];
+    imagePaths: string[];
     displayPrompt: string;
     spec: AgentSpec;
   };
@@ -184,6 +214,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const migrationNoticeShownRef = useRef(false);
 
   const agents = useMemo(() => Object.keys(config.agents), [config]);
+  const availableAgents = useMemo(() => availableAgentNames(config.agents), [config.agents]);
+  const readyCount = availableAgents.length;
+  const focusAgent = useMemo(
+    () => resolveEffectiveFocus(sessionFocusOverride, persistedFocus, availableAgents),
+    [sessionFocusOverride, persistedFocus, availableAgents],
+  );
   const agentColor = useMemo(() => {
     const m: Record<string, string> = {};
     agents.forEach((n, i) => (m[n] = AGENT_COLORS[i % AGENT_COLORS.length]!));
@@ -235,7 +271,23 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     };
   }, [stdout]);
 
-  useInput((_input, key) => {
+  const log = useCallback((text: string, level: LogLevel = "info") => {
+    setHistory((h) => [...h, { kind: "log", line: { id: nextId(), text, level } }]);
+  }, []);
+
+  useInput((rawInput, key) => {
+    if (key.ctrl && rawInput === "c") {
+      const now = Date.now();
+      if (now - lastCtrlCRef.current < 2000) {
+        exit();
+        return;
+      }
+      lastCtrlCRef.current = now;
+      if (!inputRef.current.trim()) {
+        log("Press Ctrl+C again to exit.", "info");
+      }
+      return;
+    }
     if (!key.escape) return;
     // Esc clears any queued prompt first, then cancels active runs. Doing
     // both in one keystroke matches the "abort everything" mental model;
@@ -252,10 +304,6 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       cancelRuns(activeRuns, procs);
     }
   });
-
-  const log = useCallback((text: string, level: LogLevel = "info") => {
-    setHistory((h) => [...h, { kind: "log", line: { id: nextId(), text, level } }]);
-  }, []);
 
   useEffect(() => {
     if (migrationNoticeShownRef.current) return;
@@ -291,7 +339,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       fullPrompt: string,
       displayPrompt: string,
     ) => {
-      const run = newRun(agentName, agentColor[agentName] ?? "cyan", displayPrompt);
+      const run = newRun(
+        agentName,
+        agentColor[agentName] ?? "cyan",
+        displayPrompt,
+        computeLiveMaxLines(),
+      );
       markInFlight(agentName);
       setActiveRuns((prev) => [...prev, run]);
       const prep = await prepareCommand(agentName, spec, fullPrompt);
@@ -358,6 +411,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       sessionStateRef.current.lastStatus =
         run.cancelled ? "cancelled" : run.interrupted ? "interrupted" : run.finalStatus ?? "?";
 
+      finalizeLivePreview(run, spec.parser);
+
       const completed: CompletedTurn = {
         id: nextId(),
         prompt: displayPrompt,
@@ -381,11 +436,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       perAgentFullPrompts: Record<string, string>,
       displayPrompt: string,
     ) => {
-      // Live preview height scales with terminal rows so tall windows show
-      // more context per panel. Capped at 24 so very tall screens don't make
-      // a single dispatch eat the whole transcript area.
-      const rows = process.stdout.rows ?? 30;
-      const liveMax = Math.max(8, Math.min(24, Math.floor(rows / 3)));
+      const liveMax = computeLiveMaxLines();
       const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", displayPrompt, liveMax));
       for (const n of agentNames) inFlightRef.current.add(n);
       setInFlightFromRef();
@@ -464,13 +515,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }),
       );
 
-      // Uncap structured parsers (codex-json, cursor-json, raw with a clean
-      // CLI) so their final answer renders fully. Keep the live-preview cap
-      // on for noisy plain-text parsers (agy-text) so the panel doesn't
-      // expand to dump the full intermediate transcript when the run ends.
-      for (const p of prepared) {
-        if (p.spec.parser !== "agy-text") p.run.liveMaxLines = null;
-      }
+      for (const p of prepared) finalizeLivePreview(p.run, p.spec.parser);
       const ourSpawns = new Set(prepared.map((p) => p.spawned));
       activeProcsRef.current = activeProcsRef.current.filter((sp) => !ourSpawns.has(sp));
 
@@ -560,10 +605,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     const name = createTaskDir(tasksRoot, provisionalTaskName());
     await ensureTask(name);
     setActiveTask(name);
+    // Defer the "started task" log until maybeAutoRenameProvisional settles
+    // on a final name, so the user sees one tidy line instead of a provisional
+    // slug followed immediately by a rename arrow.
     autoRenameCandidateRef.current = name;
-    log(`started new task: ${name}`);
     return name;
-  }, [log]);
+  }, []);
 
   // Called pre-dispatch, before any turn is committed to Ink's <Static>, so
   // the first turn's scrollback line is already labeled with the final slug.
@@ -578,25 +625,22 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       // to slug. Scrollback labels stay stable across the rest of the session.
       autoRenameCandidateRef.current = null;
       const current = getActiveTask();
+      // Active task changed underneath us (e.g. /task new, /resume) — that
+      // path already logged something meaningful, don't double-announce.
       if (current !== candidate) return;
       const slug = slugFromPrompt(firstPrompt);
-      if (!slug) return;
-      const tasksRoot = path.join(projectDir(), ".relay", "tasks");
-      let finalName: string;
-      try {
-        finalName = renameTask(tasksRoot, current, slug);
-      } catch (e: any) {
-        log(`could not rename task: ${e?.message ?? e}`, "warn");
-        return;
+      let finalName = candidate;
+      if (slug) {
+        const tasksRoot = path.join(projectDir(), ".relay", "tasks");
+        try {
+          finalName = renameTask(tasksRoot, current, slug);
+          setActiveTask(finalName);
+        } catch (e: any) {
+          log(`could not rename task: ${e?.message ?? e}`, "warn");
+          finalName = candidate;
+        }
       }
-      setActiveTask(finalName);
-      if (finalName !== current) {
-        log(
-          finalName === slug
-            ? `renamed task: ${current} -> ${finalName}`
-            : `renamed task: ${current} -> ${finalName} (name collision)`,
-        );
-      }
+      log(`started task: ${finalName}`);
     },
     [log],
   );
@@ -657,13 +701,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           log("no active task yet. type a prompt to start one.", "warn");
           return true;
         }
-        const dir = transcriptDir();
-        if (existsSync(dir)) {
-          for (const f of readdirSync(dir)) {
-            if (f.endsWith(".md")) unlinkSync(path.join(dir, f));
-          }
-        }
-        log(`cleared transcripts for task ${safeCurrentTask()}`);
+        clearTaskContext();
+        log(`cleared transcripts and sessions for task ${safeCurrentTask()}`);
         return true;
       }
       if (trimmed === "/reset") {
@@ -671,13 +710,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           log("no active task yet. type a prompt to start one.", "warn");
           return true;
         }
-        const dir = transcriptDir();
-        if (existsSync(dir)) {
-          for (const f of readdirSync(dir)) {
-            if (f.endsWith(".md")) unlinkSync(path.join(dir, f));
-          }
-        }
-        clearSessions();
+        clearTaskContext();
         log(`reset task ${safeCurrentTask()}: transcripts and sessions cleared`);
         return true;
       }
@@ -698,19 +731,67 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         await handleOpenCommand(rest);
         return true;
       }
-      if (trimmed === "/focus" || trimmed.startsWith("/focus ")) {
-        const rest = trimmed.replace(/^\/focus\s*/, "").replace(/^@/, "").trim();
-        if (!rest) {
-          setFocusAgent(null);
-          log("showing all live agent output");
+      const focusCmd = parseFocusCommand(trimmed);
+      if (focusCmd) {
+        const assertAgent = (name: string): boolean => {
+          if (!config.agents[name]) {
+            log(`unknown agent: @${name} (try /agents)`, "error");
+            return false;
+          }
+          if (!availableAgents.includes(name)) {
+            log(`@${name} is not available on PATH (try /agents)`, "warn");
+          }
+          return true;
+        };
+        if (focusCmd.kind === "show") {
+          const globalAgent = loadGlobalSettings().focus_agent ?? null;
+          const localAgent = loadProjectSettings().focus_agent ?? null;
+          log(
+            formatFocusStatus({
+              effective: focusAgent,
+              sessionOverride: sessionFocusOverride,
+              globalAgent,
+              localAgent,
+            }),
+          );
           return true;
         }
-        if (!config.agents[rest]) {
-          log(`unknown agent: @${rest} (try /agents)`, "error");
+        if (focusCmd.kind === "clear") {
+          if (focusCmd.scope === "session") {
+            setSessionFocusOverride(null);
+            log(focusClearMessage("session"));
+            return true;
+          }
+          if (focusCmd.scope === "global") {
+            saveGlobalFocusAgent(null);
+            setPersistedFocus(loadPersistedFocus());
+            setSessionFocusOverride(null);
+            log(focusClearMessage("global"));
+            return true;
+          }
+          saveProjectFocusAgent(null);
+          setPersistedFocus(loadPersistedFocus());
+          setSessionFocusOverride(null);
+          log(focusClearMessage("local"));
           return true;
         }
-        setFocusAgent(rest);
-        log(`focused live output on @${rest}; use /focus to show all`);
+        if (!assertAgent(focusCmd.agent)) return true;
+        if (focusCmd.scope === "session") {
+          setSessionFocusOverride(focusCmd.agent);
+          log(focusSetMessage("session", focusCmd.agent));
+          return true;
+        }
+        if (focusCmd.scope === "global") {
+          saveGlobalFocusAgent(focusCmd.agent);
+          setPersistedFocus(loadPersistedFocus());
+          setSessionFocusOverride(null);
+          log(focusSetMessage("global", focusCmd.agent));
+          return true;
+        }
+        saveProjectFocusAgent(focusCmd.agent);
+        setPersistedFocus(loadPersistedFocus());
+        setSessionFocusOverride(null);
+        log(focusSetMessage("local", focusCmd.agent));
         return true;
       }
       if (trimmed === "/sync" || trimmed.startsWith("/sync ")) {
@@ -995,15 +1076,25 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             log(`warning: ${path.extname(resolved)} is not a recognized image extension; queuing anyway`, "warn");
           }
           const abs = path.resolve(resolved);
-          state.pendingImages.push(abs);
-          added++;
-          log(`queued: ${abs}`);
+          try {
+            if (!getActiveTask()) {
+              log("no active task yet. type a prompt to start one before queuing an image.", "warn");
+              continue;
+            }
+            const [staged] = await stageImagePaths([abs]);
+            if (!staged) throw new Error(`image staging returned no path for: ${abs}`);
+            state.pendingImages.push(staged);
+            added++;
+            log(staged === abs ? `queued: ${staged}` : `queued (copied into task): ${staged}`);
+          } catch (e: any) {
+            log(`could not queue image: ${e?.message ?? e}`, "error");
+          }
         }
         if (added === 0 && tokens.length)
           log("usage: /image <path> | /image paste | /image list | /image clear");
       }
     },
-    [config, log, resetVisibleTaskState],
+    [availableAgents, config, focusAgent, log, resetVisibleTaskState, sessionFocusOverride],
   );
 
   // Dispatch a single pre-resolved queued item. Mirrors the single-agent tail
@@ -1014,18 +1105,22 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     async (item: QueuedItem) => {
       try {
         await ensureActiveTask();
-        await maybeAutoRenameProvisional(item.userPrompt);
-        const ctx = buildContext(item.agent, config.agents, config.context_turns ?? 3);
-        const fullPrompt = ctx ? ctx + item.userPrompt : item.userPrompt;
+        const userPrompt = formatPromptForAgentImages(item.agent, item.cleaned, item.imagePaths);
+        await maybeAutoRenameProvisional(userPrompt);
+        const ctx = buildContext(item.agent, config.agents, config.context_turns ?? 3, {
+          peerAgents: item.peerAgents,
+          contextCompaction: config.context_compaction,
+        });
+        const fullPrompt = ctx ? ctx + userPrompt : userPrompt;
         const response = await dispatchSingle(
           item.agent,
           item.spec,
-          item.userPrompt,
+          userPrompt,
           fullPrompt,
           item.displayPrompt,
         );
         if (response !== null) {
-          await appendTurn(item.agent, item.userPrompt, response);
+          await appendTurn(item.agent, userPrompt, response);
           if (item.spec.open_template && sessionStateRef.current.lastStatus === "done") {
             log(`/open ${item.agent} to resume in ${item.agent}'s own CLI (new window)`);
           }
@@ -1039,14 +1134,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
   // Parse a line into per-agent dispatch items. Same routing/multi/@all
   // semantics as the main dispatch path; centralized here so the queue stores
-  // a stable plan (images already baked into userPrompt, pendingPrompt
+  // a stable plan (image paths pinned into the prompt, pendingPrompt
   // folded, agent list pinned) and the drain doesn't have to re-derive.
   // Returns null when nothing dispatchable (already logged the reason).
   const parseLineToItems = useCallback(
-    (line: string): QueuedItem[] | null => {
-      let expanded = line;
+    async (compactLine: string, expandedLine: string): Promise<QueuedItem[] | null> => {
+      let expanded = expandedLine;
       const state = sessionStateRef.current;
-      if (ALL_TOKEN.test(line.trimStart())) {
+      if (ALL_TOKEN.test(expandedLine.trimStart())) {
         const available = availableAgentNames(config.agents);
         const unavail = unavailableAgentReasons(config.agents);
         const skipped = agents.filter((n) => unavail[n]);
@@ -1055,33 +1150,44 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           log("no available CLI agents for @all", "warn");
           return null;
         }
-        const allBody = line.trimStart().replace(ALL_TOKEN, "").trim();
-        let lineForExpand = line;
+        const allBody = expandedLine.trimStart().replace(ALL_TOKEN, "").trim();
+        let lineForExpand = expandedLine;
         if (!allBody && state.pendingPrompt) {
           lineForExpand = `@all ${state.pendingPrompt}`;
         }
         state.pendingPrompt = null;
         expanded = expandAll(lineForExpand, available);
       } else {
-        expanded = expandAll(line, agents);
+        expanded = expandAll(expandedLine, agents);
       }
 
       const multi = parseMulti(expanded, agents);
       if (multi && multi.body) {
         const { images: extracted, cleaned } = extractImagePaths(multi.body);
-        const allImages = [...state.pendingImages, ...extracted];
-        const userPrompt = formatPromptWithImages(cleaned, allImages);
+        let allImages = [...state.pendingImages, ...extracted];
         if (allImages.length) {
+          try {
+            allImages = await stageImagePaths(allImages);
+          } catch (e: any) {
+            log(`could not copy image for dispatch: ${e?.message ?? e}`, "error");
+            return null;
+          }
           log(
             `attaching ${allImages.length} image(s) to ${multi.agents.map((a) => "@" + a).join(", ")}`,
           );
         }
         state.pendingImages = [];
-        const tagPrefix = multi.agents.map((a) => `@${a}`).join(" ");
-        const displayPrompt = userPrompt ? `${tagPrefix} ${userPrompt}` : tagPrefix;
+        const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, focusAgent);
         return multi.agents
           .filter((a) => config.agents[a] && agentIsEnabled(config.agents[a]!))
-          .map((a) => ({ agent: a, userPrompt, displayPrompt, spec: config.agents[a]! }));
+          .map((a) => ({
+            agent: a,
+            cleaned,
+            peerAgents: requestedPeerAgents(cleaned, a, agents),
+            imagePaths: allImages,
+            displayPrompt,
+            spec: config.agents[a]!,
+          }));
       }
       if (multi && !multi.body) {
         log("multi-dispatch needs a prompt after the agent list");
@@ -1096,11 +1202,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           state.pendingPrompt = v;
         },
       };
-      const routed = prepareDispatchLine(expanded, agents, routingState);
+      const routed = prepareDispatchLine(expanded, agents, routingState, focusAgent);
       if (routed === null) {
         const choices = agents.map((n) => "@" + n).join(" ");
         const suffix = state.pendingPrompt ? " Type one of those tags to send it." : "";
-        log(`no agent tagged. Pick one: ${choices}.${suffix}`, "warn");
+        log(
+          `no agent tagged. Pick one: ${choices}.${suffix} Use /focus <agent> for a default.`,
+          "warn",
+        );
         return null;
       }
       const parsed = parseLine(routed);
@@ -1125,32 +1234,55 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         return null;
       }
       const { images: extracted, cleaned } = extractImagePaths(parsed.content);
-      const allImages = [...state.pendingImages, ...extracted];
+      let allImages = [...state.pendingImages, ...extracted];
       if (!cleaned.trim() && allImages.length === 0) {
         log("empty prompt");
         return null;
       }
-      const userPrompt = formatPromptWithImages(cleaned, allImages);
-      if (allImages.length) log(`attaching ${allImages.length} image(s) to @${agent}`);
+      if (allImages.length) {
+        try {
+          allImages = await stageImagePaths(allImages);
+        } catch (e: any) {
+          log(`could not copy image for dispatch: ${e?.message ?? e}`, "error");
+          return null;
+        }
+        log(`attaching ${allImages.length} image(s) to @${agent}`);
+      }
       state.pendingImages = [];
-      const displayPrompt = userPrompt ? `@${agent} ${userPrompt}` : `@${agent}`;
-      return [{ agent, userPrompt, displayPrompt, spec: config.agents[agent]! }];
+      const displayPrompt = displayPromptFromDispatch(
+        compactLine,
+        routed,
+        agents,
+        focusAgent,
+      );
+      return [
+        {
+          agent,
+          cleaned,
+          peerAgents: requestedPeerAgents(cleaned, agent, agents),
+          imagePaths: allImages,
+          displayPrompt,
+          spec: config.agents[agent]!,
+        },
+      ];
     },
-    [agents, config.agents, log, pushSkipped],
+    [agents, config.agents, ensureActiveTask, focusAgent, log, pushSkipped],
   );
 
   const handleSubmit = useCallback(
-    async (line: string) => {
-      if (!line.trim()) {
+    async (compactLine: string, expandedLine: string) => {
+      if (!compactLine.trim()) {
         setInput("");
         return;
       }
       // Record in prompt history before any routing decision so even queued or
       // rejected lines are recallable. Dedup against the most recent entry so
       // accidental double-submits don't clutter the file.
-      setPromptHistory((prev) => (prev[prev.length - 1] === line ? prev : [...prev, line]));
-      appendPromptHistory(line);
-      const decision = classifySubmit(line, busy);
+      setPromptHistory((prev) =>
+        prev[prev.length - 1] === compactLine ? prev : [...prev, compactLine],
+      );
+      appendPromptHistory(compactLine);
+      const decision = classifySubmit(expandedLine, busy);
       if (decision === "reject-slash") {
         log(
           "can't run a slash command while a dispatch is in flight. press Esc to cancel the run first.",
@@ -1160,17 +1292,41 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       }
       if (decision === "queue") {
         setInput("");
-        const items = parseLineToItems(line);
+        const state = sessionStateRef.current;
+        if (state.pendingImages.length > 0 || IMAGE_TOKEN.test(expandedLine)) {
+          await ensureActiveTask();
+          if (state.pendingImages.length > 0) {
+            try {
+              state.pendingImages = await stageImagePaths(state.pendingImages);
+            } catch (e: any) {
+              log(`could not copy queued image: ${e?.message ?? e}`, "error");
+              return;
+            }
+          }
+        }
+        const items = await parseLineToItems(compactLine, expandedLine);
         if (items === null || items.length === 0) return;
-        queuedRef.current = { line, items, delivered: new Set() };
-        setQueuedPrompt(line);
+        queuedRef.current = { line: compactLine, items, delivered: new Set() };
+        setQueuedPrompt(compactLine);
         return;
       }
       setInput("");
       setPreparing(true);
       try {
-        let expanded = line;
-        if (ALL_TOKEN.test(line.trimStart())) {
+        const stateForImages = sessionStateRef.current;
+        if (stateForImages.pendingImages.length > 0 || IMAGE_TOKEN.test(expandedLine)) {
+          await ensureActiveTask();
+          if (stateForImages.pendingImages.length > 0) {
+            try {
+              stateForImages.pendingImages = await stageImagePaths(stateForImages.pendingImages);
+            } catch (e: any) {
+              log(`could not copy queued image: ${e?.message ?? e}`, "error");
+              return;
+            }
+          }
+        }
+        let expanded = expandedLine;
+        if (ALL_TOKEN.test(expandedLine.trimStart())) {
           const available = availableAgentNames(config.agents);
           const unavail = unavailableAgentReasons(config.agents);
           const skipped = agents.filter((n) => unavail[n]);
@@ -1186,15 +1342,15 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           // saved prompt into the @all body. Either way (bare or with body),
           // clear pendingPrompt now that @all is being dispatched.
           const allState = sessionStateRef.current;
-          const allBody = line.trimStart().replace(ALL_TOKEN, "").trim();
-          let lineForExpand = line;
+          const allBody = expandedLine.trimStart().replace(ALL_TOKEN, "").trim();
+          let lineForExpand = expandedLine;
           if (!allBody && allState.pendingPrompt) {
             lineForExpand = `@all ${allState.pendingPrompt}`;
           }
           allState.pendingPrompt = null;
           expanded = expandAll(lineForExpand, available);
         } else {
-          expanded = expandAll(line, agents);
+          expanded = expandAll(expandedLine, agents);
         }
 
         const state = sessionStateRef.current;
@@ -1202,22 +1358,30 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         const multi = parseMulti(expanded, agents);
         if (multi && multi.body) {
           const { images: extracted, cleaned } = extractImagePaths(multi.body);
-          const allImages = [...state.pendingImages, ...extracted];
-          const userPrompt = formatPromptWithImages(cleaned, allImages);
+          let allImages = [...state.pendingImages, ...extracted];
           if (allImages.length) {
+            try {
+              allImages = await stageImagePaths(allImages);
+            } catch (e: any) {
+              log(`could not copy image for dispatch: ${e?.message ?? e}`, "error");
+              return;
+            }
             log(
               `attaching ${allImages.length} image(s) to ${multi.agents.map((a) => "@" + a).join(", ")}`,
             );
           }
           await ensureActiveTask();
+          const userPrompt = formatPromptWithImages(cleaned, allImages);
           await maybeAutoRenameProvisional(userPrompt);
           const perAgent: Record<string, string> = {};
           for (const name of multi.agents) {
-            const ctx = buildContext(name, config.agents, config.context_turns ?? 3);
+            const ctx = buildContext(name, config.agents, config.context_turns ?? 3, {
+              peerAgents: requestedPeerAgents(cleaned, name, agents),
+              contextCompaction: config.context_compaction,
+            });
             perAgent[name] = ctx ? ctx + userPrompt : userPrompt;
           }
-          const tagPrefix = multi.agents.map((a) => `@${a}`).join(" ");
-          const displayPrompt = userPrompt ? `${tagPrefix} ${userPrompt}` : tagPrefix;
+          const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, focusAgent);
           await dispatchParallel(multi.agents, userPrompt, perAgent, displayPrompt);
           state.pendingImages = [];
           return;
@@ -1235,11 +1399,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             state.pendingPrompt = v;
           },
         };
-        const routed = prepareDispatchLine(expanded, agents, routingState);
+        const routed = prepareDispatchLine(expanded, agents, routingState, focusAgent);
         if (routed === null) {
           const choices = agents.map((n) => "@" + n).join(" ");
           const suffix = state.pendingPrompt ? " Type one of those tags to send it." : "";
-          log(`no agent tagged. Pick one: ${choices}.${suffix}`, "warn");
+          log(
+            `no agent tagged. Pick one: ${choices}.${suffix} Use /focus <agent> for a default.`,
+            "warn",
+          );
           return;
         }
         const parsed = parseLine(routed);
@@ -1281,19 +1448,35 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           );
         }
         const { images: extracted, cleaned } = extractImagePaths(parsed.content);
-        const allImages = [...state.pendingImages, ...extracted];
+        let allImages = [...state.pendingImages, ...extracted];
         if (!cleaned.trim() && allImages.length === 0) {
           log("empty prompt");
           return;
         }
-        const userPrompt = formatPromptWithImages(cleaned, allImages);
-        if (allImages.length) log(`attaching ${allImages.length} image(s) to @${agent}`);
+        if (allImages.length) {
+          try {
+            allImages = await stageImagePaths(allImages);
+          } catch (e: any) {
+            log(`could not copy image for dispatch: ${e?.message ?? e}`, "error");
+            return;
+          }
+          log(`attaching ${allImages.length} image(s) to @${agent}`);
+        }
 
         await ensureActiveTask();
+        const userPrompt = formatPromptForAgentImages(agent, cleaned, allImages);
         await maybeAutoRenameProvisional(userPrompt);
-        const ctx = buildContext(agent, config.agents, config.context_turns ?? 3);
+        const ctx = buildContext(agent, config.agents, config.context_turns ?? 3, {
+          peerAgents: requestedPeerAgents(cleaned, agent, agents),
+          contextCompaction: config.context_compaction,
+        });
         const fullPrompt = ctx ? ctx + userPrompt : userPrompt;
-        const displayPrompt = userPrompt ? `@${agent} ${userPrompt}` : `@${agent}`;
+        const displayPrompt = displayPromptFromDispatch(
+          compactLine,
+          routed,
+          agents,
+          focusAgent,
+        );
         const response = await dispatchSingle(
           agent,
           config.agents[agent]!,
@@ -1317,6 +1500,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       agents,
       busy,
       config,
+      focusAgent,
       dispatchParallel,
       dispatchSingle,
       ensureActiveTask,
@@ -1355,7 +1539,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     lastStatus: sessionStateRef.current.lastStatus,
     lastElapsed: sessionStateRef.current.lastElapsed,
     verbose: sessionStateRef.current.verbose,
-    agentCount: agents.length,
+    focusAgent,
+    readyCount,
+    offCount: Math.max(0, agents.length - readyCount),
+    runningCount: inFlight.size,
   };
 
   return (
@@ -1413,9 +1600,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           const label = formatClockLabel(item.turn);
           return (
             <Box key={item.turn.id} flexDirection="column">
-              {sepKind !== "none" && <Separator kind={sepKind} label={label} />}
-              <UserPrompt prompt={item.turn.prompt} />
-              <PanelRow runs={item.turn.runs} tick={0} keyPrefix={item.turn.id} />
+              {sepKind !== "none" && <Separator kind={sepKind} label={label} cols={cols} />}
+              <UserPrompt prompt={item.turn.prompt} cols={cols} />
+              <PanelRow runs={item.turn.runs} tick={0} keyPrefix={item.turn.id} cols={cols} />
             </Box>
           );
         }}
@@ -1427,16 +1614,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         // (matches the prior single-header look); a staggered queued dispatch
         // gets its own header beneath the still-running prior group.
         if (activeRuns.length === 0) return null;
-        const visibleActiveRuns = filterFocusedRuns(activeRuns, focusAgent);
-        if (focusAgent && visibleActiveRuns.length === 0) {
-          return (
-            <Text dimColor>
-              focused on @{focusAgent}; no live output from that agent right now
-            </Text>
-          );
-        }
         const groups: Array<{ prompt: string; runs: AgentRunState[] }> = [];
-        for (const r of visibleActiveRuns) {
+        for (const r of activeRuns) {
           const last = groups[groups.length - 1];
           if (last && last.prompt === r.prompt) {
             last.runs.push(r);
@@ -1446,8 +1625,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }
         return groups.map((g, i) => (
           <Box key={`live-group-${i}`} flexDirection="column">
-            <UserPrompt prompt={g.prompt} />
-            <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} />
+            <UserPrompt prompt={g.prompt} cols={cols} />
+            <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} cols={cols} />
           </Box>
         ));
       })()}
@@ -1481,7 +1660,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           history={promptHistory}
         />
       </Box>
-      <BottomToolbar state={toolbarState} />
+      <BottomToolbar state={toolbarState} cols={cols} />
     </Box>
   );
 }

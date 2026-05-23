@@ -5,6 +5,8 @@ import {
   deletePastedPlaceholderBackward,
   expandPastedPlaceholders,
   findPlaceholderAtCursor,
+  formatRunningInputPlaceholder,
+  pasteInputIsActive,
 } from "../src/ui/MultilineInput.js";
 
 describe("compactPastedInput", () => {
@@ -32,6 +34,12 @@ describe("compactPastedInput", () => {
 
   it("keeps short single-line typed input unchanged", () => {
     expect(compactPastedInput("hello", 1)).toBeNull();
+  });
+
+  it("does not treat Enter key bytes as pasted text", () => {
+    expect(compactPastedInput("\r", 1)).toBeNull();
+    expect(compactPastedInput("\n", 1)).toBeNull();
+    expect(compactPastedInput("\r\n", 1)).toBeNull();
   });
 });
 
@@ -84,6 +92,29 @@ describe("compactDroppedImageInput", () => {
     expect(compactDroppedImageInput("hello world", 1)).toBeNull();
   });
 
+  it("does not compact normal pasted text that mentions an image path", () => {
+    expect(
+      compactDroppedImageInput("Saved screenshot to /tmp/output.png", 1),
+    ).toBeNull();
+  });
+
+  it("does not compact image URLs as dropped image paths", () => {
+    expect(
+      compactDroppedImageInput("https://example.com/output.png", 1),
+    ).toBeNull();
+  });
+
+  it("compacts a file:// URI dropped by some terminals", () => {
+    const compacted = compactDroppedImageInput(
+      "file:///Users/me/Pictures/screenshot.png",
+      3,
+    );
+    expect(compacted).toEqual({
+      placeholder: "[Image #3, screenshot.png]",
+      original: "/Users/me/Pictures/screenshot.png",
+    });
+  });
+
   it("expands back to the original path on submit", () => {
     const compacted = compactDroppedImageInput(
       "/Users/me/Pictures/screenshot.png",
@@ -96,6 +127,22 @@ describe("compactDroppedImageInput", () => {
     expect(expanded).toBe(
       "look at this /Users/me/Pictures/screenshot.png please",
     );
+  });
+});
+
+describe("pasteInputIsActive", () => {
+  it("keeps paste and drop input active while a dispatch is busy", () => {
+    expect(pasteInputIsActive(true)).toBe(true);
+  });
+
+  it("keeps paste and drop input active while idle", () => {
+    expect(pasteInputIsActive(false)).toBe(true);
+  });
+});
+
+describe("formatRunningInputPlaceholder", () => {
+  it("tells the user the next prompt will queue while agents are running", () => {
+    expect(formatRunningInputPlaceholder(0)).toBe("running · next prompt will queue");
   });
 });
 

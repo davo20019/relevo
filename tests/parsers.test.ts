@@ -82,8 +82,36 @@ describe("parserCursorJson", () => {
       '"result":"Hit usage limit. Get Cursor Pro for more agent usage.",' +
       '"session_id":"abc-123"}';
     const r = parserCursorJson(evt);
-    expect(r.kind).toBe("message");
-    expect(r.payload).toContain("Hit usage limit");
+    const arr = toArr(r);
+    expect(arr).toHaveLength(1);
+    expect(arr[0]!.kind).toBe("message");
+    expect(arr[0]!.payload).toContain("Hit usage limit");
+  });
+
+  it("emits usage from a successful result without duplicating streamed text", () => {
+    const r = parserCursorJson(
+      '{"type":"result","subtype":"success","is_error":false,"result":"OK","usage":{"inputTokens":39443,"outputTokens":32,"cacheReadTokens":5019,"cacheWriteTokens":0}}',
+    );
+    const arr = toArr(r).filter((x) => x.kind !== null);
+    expect(arr).toHaveLength(1);
+    expect(arr[0]!.kind).toBe("usage");
+    expect(JSON.parse(arr[0]!.payload!)).toEqual({
+      input: 39443,
+      output: 32,
+      cacheRead: 5019,
+      cacheCreate: 0,
+    });
+  });
+
+  it("emits both error message and usage from an is_error result with usage", () => {
+    const r = parserCursorJson(
+      '{"type":"result","subtype":"error_max_usage","is_error":true,"result":"hit limit","usage":{"inputTokens":10,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}}',
+    );
+    const kinds = toArr(r)
+      .filter((x) => x.kind !== null)
+      .map((x) => x.kind);
+    expect(kinds).toContain("message");
+    expect(kinds).toContain("usage");
   });
 
   it("joins assistant text parts", () => {

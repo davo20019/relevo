@@ -1,13 +1,11 @@
-import { Box, Text, useStdout } from "ink";
-import { useEffect, useState } from "react";
+import { Box, Text } from "ink";
 
 // Bordered "you" panel that mirrors the agent-panel chrome (top border with a
 // baked-in title, rounded box below) so the transcript reads as a back-and-
 // forth instead of agent-only output with hidden interjections. White stays
 // distinct from the colored agent borders so "you" never gets confused with
 // an agent turn.
-export function UserPrompt({ prompt }: { prompt: string }) {
-  const cols = useTerminalColumns();
+export function UserPrompt({ prompt, cols }: { prompt: string; cols: number }) {
   const shown = prompt.trim() ? prompt : "(empty)";
 
   const borderColor = "white";
@@ -44,18 +42,4 @@ export function UserPrompt({ prompt }: { prompt: string }) {
       </Box>
     </Box>
   );
-}
-
-function useTerminalColumns(): number {
-  const { stdout } = useStdout();
-  const [cols, setCols] = useState<number>(stdout?.columns ?? 80);
-  useEffect(() => {
-    if (!stdout) return;
-    const update = () => setCols(stdout.columns ?? 80);
-    stdout.on("resize", update);
-    return () => {
-      stdout.off("resize", update);
-    };
-  }, [stdout]);
-  return cols;
 }

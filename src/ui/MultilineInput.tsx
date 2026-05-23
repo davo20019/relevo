@@ -1,22 +1,26 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, usePaste } from "ink";
 import path from "node:path";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { IMAGE_TOKEN } from "../images.js";
+import { useMemo, useRef, useState } from "react";
+import {
+  IMAGE_TOKEN,
+  normalizeDroppedInput,
+  resolveImagePathCandidate,
+} from "../images.js";
 import {
   applySuggestion,
   filterSuggestions,
+  slashCommandComplete,
   SLASH_COMMAND_DESCRIPTIONS,
   tokenUnderCursor,
 } from "./autocomplete.js";
 
-// 4-frame dot cycle matching AgentPanel's "waiting" animation cadence.
-const RUNNING_DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
 const PASTE_COMPACT_THRESHOLD = 200;
+const RUNNING_INPUT_PLACEHOLDER = "running · next prompt will queue";
 
 type Props = {
   value: string;
   onChange: (next: string) => void;
-  onSubmit: (value: string) => void;
+  onSubmit: (compact: string, expanded: string) => void;
   disabled: boolean;
   slashCommands: readonly string[];
   agents: readonly string[];
@@ -35,7 +39,8 @@ type Props = {
 // When the autocomplete dropdown is open:
 //   Up / Down   — change selection
 //   Tab / Enter — accept the selection
-//   Esc         — dismiss
+//   Esc         — dismiss autocomplete (cancel runs / queue is handled in App)
+//   Ctrl+C      — clear the input buffer; press twice within 2s to quit
 export function MultilineInput({
   value,
   onChange,
@@ -48,7 +53,6 @@ export function MultilineInput({
   const [cursor, setCursor] = useState(value.length);
   const [selected, setSelected] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
-  const [runningFrame, setRunningFrame] = useState(0);
   // Position in `history` while walking with Up/Down. null = live draft.
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   // The live buffer the user was typing before entering history mode, restored
@@ -56,15 +60,6 @@ export function MultilineInput({
   const [draft, setDraft] = useState("");
   const pastedTextByPlaceholder = useRef(new Map<string, string>());
   const pastedTextCounter = useRef(0);
-
-  useEffect(() => {
-    if (!disabled) return;
-    const id = setInterval(
-      () => setRunningFrame((f) => (f + 1) % RUNNING_DOT_FRAMES.length),
-      300,
-    );
-    return () => clearInterval(id);
-  }, [disabled]);
 
   const token = useMemo(() => tokenUnderCursor(value, cursor), [value, cursor]);
   const suggestions = useMemo(
@@ -136,30 +131,58 @@ export function MultilineInput({
     setText(next, nextCursor);
   };
 
+  const clearBuffer = () => {
+    pastedTextByPlaceholder.current.clear();
+    setText("", 0);
+  };
+
+  const insertCompactedChunk = (rawInput: string) => {
+    // Drag-and-dropped image paths usually arrive as one rawInput chunk
+    // that's well under PASTE_COMPACT_THRESHOLD, so the generic paste
+    // compactor leaves them in the buffer verbatim. The long path then
+    // soft-wraps as the user types and the live area drifts downward on
+    // each redraw. Detect the path on insert and swap it for a short
+    // placeholder; expansion at submit feeds the original back to
+    // extractImagePaths as if nothing changed.
+    const asImage = compactDroppedImageInput(rawInput, pastedTextCounter.current + 1);
+    if (asImage) {
+      pastedTextCounter.current += 1;
+      pastedTextByPlaceholder.current.set(asImage.placeholder, asImage.original);
+      insertText(asImage.placeholder);
+      return true;
+    }
+    const compacted = compactPastedInput(rawInput, pastedTextCounter.current + 1);
+    if (compacted) {
+      pastedTextCounter.current += 1;
+      pastedTextByPlaceholder.current.set(compacted.placeholder, compacted.original);
+      insertText(compacted.placeholder);
+      return true;
+    }
+    return false;
+  };
+
+  usePaste(
+    (text) => {
+      // Bracketed paste bypasses useInput; fall back to plain insert when the
+      // chunk is not an image path or long paste (e.g. file:// URIs we cannot
+      // compact, or short arbitrary text).
+      if (!insertCompactedChunk(text)) insertText(text);
+    },
+    { isActive: pasteInputIsActive(disabled) },
+  );
+
   useInput(
     (rawInput, key) => {
-      if (rawInput && !key.ctrl && !key.meta) {
-        // Drag-and-dropped image paths usually arrive as one rawInput chunk
-        // that's well under PASTE_COMPACT_THRESHOLD, so the generic paste
-        // compactor leaves them in the buffer verbatim. The long path then
-        // soft-wraps as the user types and the live area drifts downward on
-        // each redraw. Detect the path on insert and swap it for a short
-        // placeholder; expansion at submit feeds the original back to
-        // extractImagePaths as if nothing changed.
-        const asImage = compactDroppedImageInput(rawInput, pastedTextCounter.current + 1);
-        if (asImage) {
-          pastedTextCounter.current += 1;
-          pastedTextByPlaceholder.current.set(asImage.placeholder, asImage.original);
-          insertText(asImage.placeholder);
-          return;
-        }
-        const compacted = compactPastedInput(rawInput, pastedTextCounter.current + 1);
-        if (compacted) {
-          pastedTextCounter.current += 1;
-          pastedTextByPlaceholder.current.set(compacted.placeholder, compacted.original);
-          insertText(compacted.placeholder);
-          return;
-        }
+      // Enter arrives as rawInput `\r` in most terminals. Ink does not clear
+      // that sequence before our handler, so the paste compactor must not run
+      // on return — otherwise a lone `\r` looks like a 2-line paste.
+      if (rawInput && !key.ctrl && !key.meta && !key.return) {
+        if (insertCompactedChunk(rawInput)) return;
+      }
+
+      if (key.ctrl && rawInput === "c") {
+        clearBuffer();
+        return;
       }
 
       if (acOpen) {
@@ -176,17 +199,18 @@ export function MultilineInput({
           return;
         }
         if (key.return && !key.meta) {
-          acceptSuggestion();
-          return;
-        }
-        if (key.escape) {
+          // A complete `/agents disable claude`-style line still matches agent
+          // suggestions, so Enter would keep accepting instead of running the
+          // command. Submit when every positional arg is filled.
+          if (!slashCommandComplete(value, agents)) {
+            acceptSuggestion();
+            return;
+          }
+          setAcDismissed(true);
+        } else if (key.escape) {
           setAcDismissed(true);
           return;
         }
-      } else if (key.escape) {
-        pastedTextByPlaceholder.current.clear();
-        setText("", 0);
-        return;
       }
 
       if (key.return) {
@@ -200,7 +224,11 @@ export function MultilineInput({
           return;
         }
         if (!value.trim()) return;
-        onSubmit(expandPastedPlaceholders(value, pastedTextByPlaceholder.current.entries()));
+        const expanded = expandPastedPlaceholders(
+          value,
+          pastedTextByPlaceholder.current.entries(),
+        );
+        onSubmit(value, expanded);
         pastedTextByPlaceholder.current.clear();
         setCursor(0);
         setSelected(0);
@@ -325,7 +353,7 @@ export function MultilineInput({
           ❯{" "}
         </Text>
         <Box flexDirection="column">
-          {renderBuffer(value, safeCursor, disabled, runningFrame)}
+          {renderBuffer(value, safeCursor, disabled, 0)}
         </Box>
       </Box>
       {acOpen && (
@@ -368,6 +396,8 @@ export function compactPastedInput(
   rawInput: string,
   id: number,
 ): { placeholder: string; original: string } | null {
+  if (rawInput === "\r" || rawInput === "\n" || rawInput === "\r\n") return null;
+
   const lineBreaks = rawInput.match(/\r\n|\r|\n/g);
   if (!lineBreaks && rawInput.length <= PASTE_COMPACT_THRESHOLD) return null;
 
@@ -381,23 +411,36 @@ export function compactPastedInput(
   };
 }
 
+export function pasteInputIsActive(_disabled: boolean): boolean {
+  return true;
+}
+
 export function compactDroppedImageInput(
   rawInput: string,
   id: number,
 ): { placeholder: string; original: string } | null {
+  const normalized = normalizeDroppedInput(rawInput);
   const names: string[] = [];
-  for (const m of rawInput.matchAll(IMAGE_TOKEN)) {
+  let cursor = 0;
+  for (const m of normalized.matchAll(IMAGE_TOKEN)) {
+    if (normalized.slice(cursor, m.index).trim() !== "") return null;
+
     const raw = m[1] ?? m[2] ?? m[3];
     if (!raw) continue;
     const unescaped = raw.replace(/\\(.)/g, "$1");
-    names.push(path.basename(unescaped));
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(unescaped) && !/^file:\/\//i.test(unescaped)) {
+      return null;
+    }
+    names.push(path.basename(resolveImagePathCandidate(raw)));
+    cursor = m.index + m[0].length;
   }
   if (names.length === 0) return null;
+  if (normalized.slice(cursor).trim() !== "") return null;
 
   const summary = names.length === 1 ? names[0]! : `${names.length} images`;
   return {
     placeholder: `[Image #${id}, ${summary}]`,
-    original: rawInput,
+    original: normalized,
   };
 }
 
@@ -452,14 +495,17 @@ export function deletePastedPlaceholderBackward(
   return null;
 }
 
+export function formatRunningInputPlaceholder(_frame: number): string {
+  return RUNNING_INPUT_PLACEHOLDER;
+}
+
 function renderBuffer(value: string, cursor: number, disabled: boolean, runningFrame: number) {
   // While a dispatch is in flight and the buffer is empty, show a dim
-  // "(running...)" placeholder so the user knows agents are still working.
+  // queueing placeholder so the user knows new input is still accepted.
   // Once they start typing, the placeholder yields to their text (which the
   // queue hint above the input labels as "queued").
   if (disabled && value.length === 0) {
-    const dots = RUNNING_DOT_FRAMES[runningFrame % RUNNING_DOT_FRAMES.length]!;
-    return <Text dimColor>{`(running${dots})`}</Text>;
+    return <Text dimColor>{formatRunningInputPlaceholder(runningFrame)}</Text>;
   }
   const lines = value.length === 0 ? [""] : value.split("\n");
 

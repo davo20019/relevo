@@ -145,6 +145,29 @@ function rankSigiled(source: readonly string[], q: string): string[] {
   return [...prefix, ...sub].slice(0, 8);
 }
 
+// True when a known slash command has all required positional args filled in,
+// so Enter should submit instead of accepting another autocomplete item.
+export function slashCommandComplete(value: string, agents: readonly string[]): boolean {
+  const line = (value.split("\n")[0] ?? "").trim();
+  if (!line.startsWith("/")) return false;
+  const parts = line.split(/\s+/);
+  const command = parts[0]!;
+  const specs = COMMAND_ARGS[command];
+  if (!specs) return false;
+  const args = parts.slice(1).map((a) => a.replace(/^@/, ""));
+  if (args.length !== specs.length) return false;
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i]!;
+    const arg = args[i]!;
+    if (spec.type === "literal") {
+      if (!spec.values.includes(arg)) return false;
+    } else if (!agents.includes(arg)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function applySuggestion(
   value: string,
   token: TokenInfo,

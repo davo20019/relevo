@@ -132,10 +132,15 @@ export function prepareDispatchLine(
   line: string,
   knownAgents: string[],
   state: Pending,
+  focusAgent: string | null = null,
 ): string | null {
   const routed = smartRoute(line, knownAgents);
   const parsed = parseLine(routed);
   if (parsed.kind === "untagged") {
+    if (focusAgent && knownAgents.includes(focusAgent)) {
+      state.pendingPrompt = null;
+      return parsed.content ? `@${focusAgent} ${parsed.content}` : `@${focusAgent}`;
+    }
     state.pendingPrompt = parsed.content;
     return null;
   }
@@ -153,4 +158,21 @@ export function prepareDispatchLine(
     state.pendingPrompt = null;
   }
   return routed;
+}
+
+export function requestedPeerAgents(
+  content: string,
+  targetAgent: string,
+  knownAgents: readonly string[],
+): string[] {
+  const out: string[] = [];
+  ANY_MENTION.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANY_MENTION.exec(content))) {
+    const name = m[1]!;
+    if (name === targetAgent) continue;
+    if (!knownAgents.includes(name)) continue;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
 }
