@@ -41,18 +41,6 @@ existing auth is reused.
 ## Quickstart
 
 ```bash
-# from a clone
-npm install
-npm run build
-npm start
-
-# or run from source during development
-npm run dev
-```
-
-Once published you can also run it without cloning:
-
-```bash
 npx relevo
 # or install globally
 npm i -g relevo && relevo
@@ -61,6 +49,15 @@ npm i -g relevo && relevo
 First run creates `~/.config/relevo/agents.json` with six agents wired up:
 `claude`, `codex`, `cursor`, `opencode`, `agy` (Antigravity), and `pi`. Type
 `/help` inside the REPL.
+
+### From source
+
+```bash
+git clone https://github.com/davo20019/relevo.git
+cd relevo
+npm install
+npm run dev   # or: npm run build && npm start
+```
 
 ## Usage
 

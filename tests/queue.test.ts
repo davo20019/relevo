@@ -32,26 +32,25 @@ describe("classifySubmit", () => {
 
 describe("formatQueuePreview", () => {
   it("returns short prompts unchanged", () => {
-    expect(formatQueuePreview("hello", 60)).toBe("hello");
+    expect(formatQueuePreview("hello", 60)).toEqual(["hello"]);
   });
 
   it("collapses internal whitespace into single spaces", () => {
-    expect(formatQueuePreview("hello   world\n\nagain", 60)).toBe("hello world again");
+    expect(formatQueuePreview("hello   world\n\nagain", 60)).toEqual(["hello world again"]);
   });
 
   it("trims leading and trailing whitespace", () => {
-    expect(formatQueuePreview("  hi  ", 60)).toBe("hi");
+    expect(formatQueuePreview("  hi  ", 60)).toEqual(["hi"]);
   });
 
-  it("truncates with an ellipsis when over the limit", () => {
-    const input = "a".repeat(100);
-    const out = formatQueuePreview(input, 60);
-    expect(out.length).toBe(60);
-    expect(out.endsWith("…")).toBe(true);
-    expect(out.slice(0, -1)).toBe("a".repeat(59));
+  it("wraps prompts onto a second line before truncating", () => {
+    expect(formatQueuePreview("one two three four five six seven", 14)).toEqual([
+      "one two three",
+      "four five six…",
+    ]);
   });
 
-  it("respects a custom max", () => {
-    expect(formatQueuePreview("abcdef", 4)).toBe("abc…");
+  it("splits long words across two lines and ellipsizes overflow", () => {
+    expect(formatQueuePreview("abcdefghijklmnop", 6)).toEqual(["abcdef", "ghijk…"]);
   });
 });

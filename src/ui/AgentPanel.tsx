@@ -4,6 +4,8 @@ import {
   displayText,
   elapsedSeconds,
   hiddenLines,
+  idleSeconds,
+  lastActivityPreview,
   type AgentRunState,
 } from "../run.js";
 import { renderMarkdown } from "./markdown.js";
@@ -120,18 +122,63 @@ export function AgentPanel({
             ⋮ {hidden} earlier line{hidden === 1 ? "" : "s"} hidden
           </Text>
         )}
-        <Box>
+        <Box flexDirection="column">
           {hasContent ? (
             renderMarkdown(text, width !== undefined ? Math.max(1, width - 4) : undefined)
+          ) : isRunning ? (
+            <WaitingLine run={run} elapsed={elapsed} width={width} />
           ) : (
-            <Text dimColor>
-              {isRunning
-                ? `waiting${DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!}`
-                : "(no output)"}
-            </Text>
+            <Text dimColor>(no output)</Text>
           )}
         </Box>
       </Box>
     </Box>
+  );
+}
+
+// Idle threshold (s) before we flag the run as quiet. Two minutes is long
+// enough to avoid flapping for normal tool latency but short enough that a
+// genuinely wedged process gets surfaced before the user has to wonder.
+const IDLE_QUIET_SECONDS = 120;
+
+function WaitingLine({
+  run,
+  elapsed,
+  width,
+}: {
+  run: AgentRunState;
+  elapsed: number;
+  width: number | undefined;
+}) {
+  const preview = lastActivityPreview(run);
+  const idle = idleSeconds(run);
+  const dots = DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
+  const maxPreviewWidth = width !== undefined ? Math.max(10, width - 4) : 200;
+
+  if (!preview) {
+    return (
+      <Text dimColor>
+        waiting{dots}
+        {idle >= IDLE_QUIET_SECONDS && (
+          <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
+        )}
+      </Text>
+    );
+  }
+
+  const shown = preview.length <= maxPreviewWidth
+    ? preview
+    : preview.slice(0, maxPreviewWidth - 1) + "…";
+
+  return (
+    <>
+      <Text dimColor>{shown}</Text>
+      <Text dimColor>
+        ...working{dots.trimEnd()}
+        {idle >= IDLE_QUIET_SECONDS && (
+          <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
+        )}
+      </Text>
+    </>
   );
 }

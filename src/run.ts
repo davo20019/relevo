@@ -5,7 +5,14 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { AgentSpec } from "./config.js";
-import { PARSERS, parserRaw, renderRawFallback, type LineParser } from "./parsers.js";
+import {
+  PARSERS,
+  parserRaw,
+  parseUsagePayload,
+  renderRawFallback,
+  type LineParser,
+  type TokenUsage,
+} from "./parsers.js";
 import { loadSessions, saveSessionId } from "./sessions.js";
 import { projectDir } from "./paths.js";
 import { shlexSplit } from "./shlex.js";
@@ -19,28 +26,52 @@ export type AgentRunState = {
   responseChunks: string[];
   nCommands: number;
   nEdits: number;
+  nTools: number;
   running: boolean;
   finalStatus: string | null;
   cancelled: boolean;
   interrupted: boolean;
   liveMaxLines: number | null;
+  prompt: string;
+  // Last-activity previews so an idle-looking panel can show *what* the agent
+  // is currently doing (Read/Grep streaks otherwise produce nothing visible).
+  lastCommand: string | null;
+  lastEdit: string | null;
+  lastTool: string | null;
+  // Wall-clock ms of the most recent parsed event. Used to render "idle Xs"
+  // so a wedged process looks different from a busy one.
+  lastActivityAt: number;
+  tokens: TokenUsage | null;
 };
 
-export function newRun(agentName: string, color: string, liveMaxLines: number | null = null): AgentRunState {
+export function newRun(
+  agentName: string,
+  color: string,
+  prompt: string,
+  liveMaxLines: number | null = null,
+): AgentRunState {
+  const start = Date.now();
   return {
     agentName,
     color,
-    start: Date.now(),
+    start,
     end: null,
     displayChunks: [],
     responseChunks: [],
     nCommands: 0,
     nEdits: 0,
+    nTools: 0,
     running: true,
     finalStatus: null,
     cancelled: false,
     interrupted: false,
     liveMaxLines,
+    prompt,
+    lastCommand: null,
+    lastEdit: null,
+    lastTool: null,
+    lastActivityAt: start,
+    tokens: null,
   };
 }
 
@@ -59,7 +90,38 @@ export function activitySuffix(run: AgentRunState): string {
   const parts: string[] = [];
   if (run.nCommands) parts.push(`${run.nCommands} cmd${run.nCommands === 1 ? "" : "s"}`);
   if (run.nEdits) parts.push(`${run.nEdits} edit${run.nEdits === 1 ? "" : "s"}`);
+  if (run.nTools) parts.push(`${run.nTools} tool${run.nTools === 1 ? "" : "s"}`);
+  const tok = formatTokens(run.tokens);
+  if (tok) parts.push(tok);
   return parts.length ? " · " + parts.join(" · ") : "";
+}
+
+function formatNum(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+}
+
+function formatTokens(t: TokenUsage | null): string {
+  if (!t) return "";
+  const totalIn = t.input + t.cacheRead + t.cacheCreate;
+  if (!totalIn && !t.output) return "";
+  return `${formatNum(totalIn)} in / ${formatNum(t.output)} out`;
+}
+
+// Latest one-line preview of what the agent is doing, or null if there's
+// nothing more interesting than "running". Most recent kind wins.
+export function lastActivityPreview(run: AgentRunState): string | null {
+  if (run.lastCommand) return `$ ${run.lastCommand}`;
+  if (run.lastEdit) return `+ edited ${run.lastEdit}`;
+  if (run.lastTool) return run.lastTool;
+  return null;
+}
+
+// Seconds since the most recent parsed event. Useful only while running.
+export function idleSeconds(run: AgentRunState): number {
+  if (!run.running) return 0;
+  return Math.max(0, (Date.now() - run.lastActivityAt) / 1000);
 }
 
 export function displayText(run: AgentRunState): string {
@@ -208,12 +270,18 @@ export function resetRunForRetry(run: AgentRunState, note: string): void {
   run.responseChunks = [];
   run.nCommands = 0;
   run.nEdits = 0;
+  run.nTools = 0;
   run.running = true;
   run.finalStatus = null;
   run.end = null;
   run.cancelled = false;
   run.interrupted = false;
   run.start = Date.now();
+  run.lastCommand = null;
+  run.lastEdit = null;
+  run.lastTool = null;
+  run.lastActivityAt = run.start;
+  run.tokens = null;
 }
 
 // Stream stdout/stderr lines through the parser into run state. Resolves when
@@ -236,15 +304,26 @@ export async function streamToRun(opts: StreamOptions): Promise<StreamResult> {
     const parsed = parser(withLf);
     const results = Array.isArray(parsed) ? parsed : [parsed];
     for (const { kind, payload } of results) {
+      if (kind === null) continue;
+      // Every non-null event counts as activity, even if we don't render it.
+      run.lastActivityAt = Date.now();
       if (kind === "message" && payload) {
         run.displayChunks.push(payload);
         run.responseChunks.push(payload);
       } else if (kind === "command") {
         run.nCommands++;
+        run.lastCommand = payload;
         if (verbose) run.displayChunks.push(`\`$ ${payload}\`\n\n`);
       } else if (kind === "edit") {
         run.nEdits++;
+        run.lastEdit = payload;
         if (verbose) run.displayChunks.push(`\`+ edited ${payload}\`\n\n`);
+      } else if (kind === "tool") {
+        run.nTools++;
+        run.lastTool = payload;
+      } else if (kind === "usage") {
+        const u = parseUsagePayload(payload);
+        if (u) run.tokens = u;
       } else if (kind === "session_id" && !captured && !preGen && payload) {
         await saveSessionId(agentName, payload);
         captured = payload;

@@ -14,8 +14,33 @@ export function classifySubmit(line: string, busy: boolean): QueueDecision {
   return "queue";
 }
 
-export function formatQueuePreview(line: string, max: number): string {
+export function formatQueuePreview(line: string, width: number): string[] {
   const oneLine = line.replace(/\s+/g, " ").trim();
-  if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, max - 1) + "…";
+  const max = Math.max(1, width);
+  if (oneLine.length <= max) return [oneLine];
+
+  const rows: string[] = [];
+  let rest = oneLine;
+  while (rows.length < 2 && rest.length > 0) {
+    if (rest.length <= max) {
+      rows.push(rest);
+      rest = "";
+      break;
+    }
+
+    const chunk = rest.slice(0, max + 1);
+    const breakAt = chunk.lastIndexOf(" ", max);
+    const take = breakAt > 0 ? breakAt : max;
+    rows.push(rest.slice(0, take));
+    rest = rest.slice(take).trimStart();
+  }
+
+  if (rest.length > 0 && rows.length > 0) {
+    const last = rows[rows.length - 1] ?? "";
+    rows[rows.length - 1] = last.length >= max
+      ? last.slice(0, max - 1) + "…"
+      : last + "…";
+  }
+
+  return rows;
 }

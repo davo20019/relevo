@@ -19,7 +19,7 @@ export const IMAGE_EXTS = new Set([
 
 // Matches drag-and-drop shapes on macOS terminals: double-quoted, single-quoted,
 // or bare-with-backslash-escaped-spaces image paths.
-const IMAGE_TOKEN = new RegExp(
+export const IMAGE_TOKEN = new RegExp(
   String.raw`"([^"]+?\.(?:png|jpe?g|gif|webp|bmp|tiff|heic))"` +
     `|` +
     String.raw`'([^']+?\.(?:png|jpe?g|gif|webp|bmp|tiff|heic))'` +

@@ -33,6 +33,46 @@ describe("parserCodexJson", () => {
   it("surfaces clap-style error: lines", () => {
     expect(parserCodexJson("error: unknown flag --foo").kind).toBe("message");
   });
+
+  it("emits command on item.started for command_execution", () => {
+    const r = parserCodexJson(
+      '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \\"ls\\"","status":"in_progress"}}',
+    );
+    expect(r.kind).toBe("command");
+    expect(r.payload).toContain("ls");
+  });
+
+  it("skips command_execution on item.completed (already counted on started)", () => {
+    const r = parserCodexJson(
+      '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \\"ls\\"","exit_code":0,"status":"completed"}}',
+    );
+    expect(r.kind).toBeNull();
+  });
+
+  it("surfaces file_change items on item.completed as edits", () => {
+    const r = parserCodexJson(
+      '{"type":"item.completed","item":{"type":"file_change","path":"src/foo.ts"}}',
+    );
+    expect(r).toEqual({ kind: "edit", payload: "src/foo.ts" });
+  });
+
+  it("extracts token usage from turn.completed", () => {
+    const r = parserCodexJson(
+      '{"type":"turn.completed","usage":{"input_tokens":58584,"cached_input_tokens":24704,"output_tokens":644,"reasoning_output_tokens":73}}',
+    );
+    expect(r.kind).toBe("usage");
+    const parsed = JSON.parse(r.payload!);
+    expect(parsed).toEqual({
+      input: 58584 - 24704,
+      output: 644,
+      cacheRead: 24704,
+      cacheCreate: 0,
+    });
+  });
+
+  it("returns null for turn.completed with no usage data", () => {
+    expect(parserCodexJson('{"type":"turn.completed"}').kind).toBeNull();
+  });
 });
 
 describe("parserCursorJson", () => {
@@ -114,11 +154,49 @@ describe("parserClaudeJson", () => {
     expect(arr[1].payload).toBe("ls");
   });
 
-  it("drops Read/Grep tool_use (noise)", () => {
+  it("surfaces Read tool_use as a tool event with the file path", () => {
     const r = parserClaudeJson(
       '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/x.ts"}}]}}',
     );
-    expect(toArr(r).filter((x) => x.kind !== null)).toHaveLength(0);
+    const arr = toArr(r).filter((x) => x.kind !== null);
+    expect(arr).toHaveLength(1);
+    expect(arr[0].kind).toBe("tool");
+    expect(arr[0].payload).toContain("Read");
+    expect(arr[0].payload).toContain("/x.ts");
+  });
+
+  it("surfaces Grep tool_use with pattern + path", () => {
+    const r = parserClaudeJson(
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"useAuth","path":"src/"}}]}}',
+    );
+    const arr = toArr(r).filter((x) => x.kind !== null);
+    expect(arr[0].kind).toBe("tool");
+    expect(arr[0].payload).toContain("Grep");
+    expect(arr[0].payload).toContain("useAuth");
+    expect(arr[0].payload).toContain("src/");
+  });
+
+  it("emits a usage event from a successful result", () => {
+    const r = parserClaudeJson(
+      '{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":2000}}',
+    );
+    const arr = toArr(r).filter((x) => x.kind !== null);
+    expect(arr).toHaveLength(1);
+    expect(arr[0].kind).toBe("usage");
+    const u = JSON.parse(arr[0].payload!);
+    expect(u.input).toBe(100);
+    expect(u.output).toBe(50);
+    expect(u.cacheRead).toBe(2000);
+  });
+
+  it("emits both error message and usage from an is_error result with usage", () => {
+    const r = parserClaudeJson(
+      '{"type":"result","subtype":"error","is_error":true,"result":"hit limit","usage":{"input_tokens":10,"output_tokens":0}}',
+    );
+    const arr = toArr(r).filter((x) => x.kind !== null);
+    const kinds = arr.map((x) => x.kind);
+    expect(kinds).toContain("message");
+    expect(kinds).toContain("usage");
   });
 
   it("surfaces result is_error as an error message", () => {

@@ -1,12 +1,66 @@
-export type ParseKind = "message" | "command" | "edit" | "session_id" | null;
+export type ParseKind =
+  | "message"
+  | "command"
+  | "edit"
+  | "session_id"
+  | "tool"
+  | "usage"
+  | null;
 export type ParseResult = { kind: ParseKind; payload: string | null };
 
 export type LineParser = (line: string) => ParseResult | ParseResult[];
 
 const NULL: ParseResult = { kind: null, payload: null };
 
+// Token-usage payloads are JSON-encoded so the existing ParseResult shape
+// (string payloads only) survives unchanged. Consumers parse via parseUsagePayload.
+export type TokenUsage = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreate: number;
+};
+
+export function parseUsagePayload(payload: string | null): TokenUsage | null {
+  if (!payload) return null;
+  try {
+    const obj = JSON.parse(payload);
+    if (!obj || typeof obj !== "object") return null;
+    return {
+      input: Number(obj.input ?? 0),
+      output: Number(obj.output ?? 0),
+      cacheRead: Number(obj.cacheRead ?? 0),
+      cacheCreate: Number(obj.cacheCreate ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 3) + "...";
+}
+
 export function parserRaw(line: string): ParseResult {
   return { kind: "message", payload: line };
+}
+
+function extractCodexUsage(usageObj: any): ParseResult | null {
+  if (!usageObj || typeof usageObj !== "object") return null;
+  // codex's totals: input_tokens is gross input (includes cached), with the
+  // cached portion called out separately. Split into uncached + cacheRead so
+  // the totalIn math in run.ts matches across providers. codex has no
+  // cache-creation analog. reasoning_output_tokens is hidden CoT and is left
+  // out of `output` so the display reflects what the user actually received.
+  const grossIn = Number(usageObj.input_tokens ?? 0);
+  const cacheRead = Number(usageObj.cached_input_tokens ?? 0);
+  const output = Number(usageObj.output_tokens ?? 0);
+  if (!grossIn && !output && !cacheRead) return null;
+  const input = Math.max(0, grossIn - cacheRead);
+  return {
+    kind: "usage",
+    payload: JSON.stringify({ input, output, cacheRead, cacheCreate: 0 }),
+  };
 }
 
 export function parserCodexJson(line: string): ParseResult {
@@ -28,21 +82,31 @@ export function parserCodexJson(line: string): ParseResult {
     const tid = evt.thread_id;
     if (tid) return { kind: "session_id", payload: String(tid) };
   }
+  // Surface command_execution on `item.started` so the live panel shows the
+  // running command immediately instead of waiting for it to finish. Counted
+  // exactly once per command since we skip command_execution on item.completed.
+  if (t === "item.started") {
+    const item = evt.item ?? {};
+    if (item.type === "command_execution") {
+      const cmd = String(item.command ?? "");
+      const short = cmd.length <= 120 ? cmd : cmd.slice(0, 117) + "...";
+      return { kind: "command", payload: short };
+    }
+  }
   if (t === "item.completed") {
     const item = evt.item ?? {};
     const itype = item.type ?? "";
     if (itype === "agent_message") {
       return { kind: "message", payload: (item.text ?? "") + "\n\n" };
     }
-    if (itype === "command_execution") {
-      const cmd = String(item.command ?? "");
-      const short = cmd.length <= 120 ? cmd : cmd.slice(0, 117) + "...";
-      return { kind: "command", payload: short };
-    }
     if (itype === "file_change" || itype === "patch_apply") {
       const p = item.path ?? item.file ?? "";
       return { kind: "edit", payload: String(p) };
     }
+  }
+  if (t === "turn.completed") {
+    const usage = extractCodexUsage(evt.usage);
+    if (usage) return usage;
   }
   return NULL;
 }
@@ -151,9 +215,49 @@ export function parserCursorJson(line: string): ParseResult {
   return NULL;
 }
 
-// Tool names whose execution we surface as `edit` events. Anything else gets
-// dropped (Read/Grep/Glob would just be noise; Bash is handled separately).
+// Tool names whose execution we surface as `edit` events. Anything else (besides
+// Bash, which becomes `command`) surfaces as a `tool` event with a target preview.
 const CLAUDE_EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+// Picks a one-line "target" for a Claude tool_use input so the UI can show
+// "Reading src/foo.ts" instead of just "Read". Defensive against missing fields.
+function claudeToolTarget(name: string, input: any): string {
+  if (!input || typeof input !== "object") return "";
+  if (name === "Grep") {
+    const pat = typeof input.pattern === "string" ? input.pattern : "";
+    const path = typeof input.path === "string" ? input.path : "";
+    if (pat && path) return `${truncate(pat, 30)} in ${truncate(path, 30)}`;
+    if (pat) return truncate(pat, 60);
+  }
+  if (name === "Glob" && typeof input.pattern === "string") {
+    return truncate(input.pattern, 60);
+  }
+  if (name === "WebSearch" && typeof input.query === "string") {
+    return truncate(input.query, 60);
+  }
+  if ((name === "Task" || name === "TaskCreate") &&
+      (typeof input.subject === "string" || typeof input.description === "string")) {
+    return truncate(String(input.subject ?? input.description), 60);
+  }
+  for (const key of ["file_path", "notebook_path", "path", "url", "pattern", "query"]) {
+    const v = input[key];
+    if (typeof v === "string" && v) return truncate(v, 60);
+  }
+  return "";
+}
+
+function extractClaudeUsage(usageObj: any): ParseResult | null {
+  if (!usageObj || typeof usageObj !== "object") return null;
+  const input = Number(usageObj.input_tokens ?? 0);
+  const output = Number(usageObj.output_tokens ?? 0);
+  const cacheRead = Number(usageObj.cache_read_input_tokens ?? 0);
+  const cacheCreate = Number(usageObj.cache_creation_input_tokens ?? 0);
+  if (!input && !output && !cacheRead && !cacheCreate) return null;
+  return {
+    kind: "usage",
+    payload: JSON.stringify({ input, output, cacheRead, cacheCreate }),
+  };
+}
 
 export function parserClaudeJson(line: string): ParseResult | ParseResult[] {
   // Filter claude's --output-format stream-json events into typed results.
@@ -191,30 +295,35 @@ export function parserClaudeJson(line: string): ParseResult | ParseResult[] {
         const input = p.input ?? {};
         if (name === "Bash") {
           const cmd = String(input.command ?? input.description ?? "");
-          if (cmd) {
-            const short = cmd.length <= 120 ? cmd : cmd.slice(0, 117) + "...";
-            results.push({ kind: "command", payload: short });
-          }
+          if (cmd) results.push({ kind: "command", payload: truncate(cmd, 120) });
         } else if (CLAUDE_EDIT_TOOLS.has(name)) {
           const p2 = input.file_path ?? input.notebook_path ?? "";
           if (p2) results.push({ kind: "edit", payload: String(p2) });
+        } else if (name) {
+          const target = claudeToolTarget(name, input);
+          results.push({ kind: "tool", payload: target ? `${name} ${target}` : name });
         }
       }
     }
     if (textPieces.length) {
       results.unshift({ kind: "message", payload: textPieces.join("") + "\n\n" });
     }
+    const usage = extractClaudeUsage(evt?.message?.usage);
+    if (usage) results.push(usage);
     return results.length ? results : NULL;
   }
   if (t === "result") {
+    const results: ParseResult[] = [];
     if (evt?.is_error) {
       const msg = evt?.result ?? evt?.error ?? evt?.message ?? `error (${evt?.subtype ?? "unknown"})`;
-      return { kind: "message", payload: `[error] ${msg}\n` };
+      results.push({ kind: "message", payload: `[error] ${msg}\n` });
     }
-    // The final assistant turn already streamed via `assistant` events, so
-    // re-emitting `result.result` would duplicate it. Drop unless it carries
-    // content we haven't already shown (rare in -p mode).
-    return NULL;
+    // Otherwise the final assistant turn already streamed via `assistant`
+    // events, so re-emitting `result.result` would duplicate it. The stateful
+    // wrapper handles the no-text-streamed fallback.
+    const usage = extractClaudeUsage(evt?.usage);
+    if (usage) results.push(usage);
+    return results.length ? results : NULL;
   }
   return NULL;
 }
@@ -237,21 +346,35 @@ export function parserAgyText(line: string): ParseResult {
 // and any caller that does not want this fallback.
 export function createClaudeJsonParser(): LineParser {
   let sawAssistantText = false;
+  let sawResult = false;
   return (line: string): ParseResult | ParseResult[] => {
     const stripped = line.trim();
+    let evt: any = null;
     if (stripped) {
       try {
-        const evt = JSON.parse(stripped);
-        if (evt?.type === "result" && !evt?.is_error && !sawAssistantText) {
-          const text = typeof evt?.result === "string" ? evt.result.trim() : "";
-          if (text) {
-            sawAssistantText = true;
-            return { kind: "message", payload: text + "\n" };
-          }
-        }
+        evt = JSON.parse(stripped);
       } catch {
         // Not JSON: fall through to the stateless parser.
       }
+    }
+    if (evt?.type === "result") {
+      // A duplicate result event would re-emit usage; suppress.
+      if (sawResult) return NULL;
+      sawResult = true;
+      const results: ParseResult[] = [];
+      if (evt?.is_error) {
+        const msg = evt?.result ?? evt?.error ?? evt?.message ?? `error (${evt?.subtype ?? "unknown"})`;
+        results.push({ kind: "message", payload: `[error] ${msg}\n` });
+      } else if (!sawAssistantText) {
+        const text = typeof evt?.result === "string" ? evt.result.trim() : "";
+        if (text) {
+          sawAssistantText = true;
+          results.push({ kind: "message", payload: text + "\n" });
+        }
+      }
+      const usage = extractClaudeUsage(evt?.usage);
+      if (usage) results.push(usage);
+      return results.length ? results : NULL;
     }
     const out = parserClaudeJson(line);
     const arr = Array.isArray(out) ? out : [out];

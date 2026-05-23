@@ -43,6 +43,7 @@ import {
   type AgentRunState,
 } from "../run.js";
 import { classifySubmit, formatQueuePreview } from "../queue.js";
+import { appendPromptHistory, loadPromptHistory } from "../prompt-history.js";
 import { BottomToolbar } from "./BottomToolbar.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { colorizeAgentMentions } from "./colorizeAgents.js";
@@ -112,12 +113,61 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const [config, setConfig] = useState<AgentConfig>(initialConfig);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeRuns, setActiveRuns] = useState<AgentRunState[]>([]);
-  const [activePromptText, setActivePromptText] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Submitted-prompt history for the input's Up/Down recall. Loaded once from
+  // disk on mount; appended whenever a non-empty line is submitted.
+  const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory());
+  // Set of agents currently mid-dispatch. We allow concurrent dispatches so a
+  // queued prompt can fire on an agent the moment it idles, even if other
+  // agents in a prior @all batch are still running. The ref is the source of
+  // truth read synchronously from event handlers (queue drain, Esc) so a
+  // newly-started dispatch is observable on the same tick; the state copy is
+  // what triggers re-renders / effects.
+  const [inFlight, setInFlight] = useState<Set<string>>(() => new Set());
+  const inFlightRef = useRef<Set<string>>(new Set());
   const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
-  const queuedPromptRef = useRef<string | null>(null);
+  // Queue holds a pre-resolved per-agent dispatch plan plus the set of agents
+  // that have already received it. Drain visits each target as it idles and
+  // stops re-firing once it's in `delivered`. Cleared when every target has
+  // been served. Pre-resolution at queue time means image attachments and
+  // pendingPrompt fold-ins are captured against the state at submission, not
+  // re-derived later when state may have shifted.
+  type QueuedItem = {
+    agent: string;
+    userPrompt: string;
+    displayPrompt: string;
+    spec: AgentSpec;
+  };
+  const queuedRef = useRef<{
+    line: string;
+    items: QueuedItem[];
+    delivered: Set<string>;
+  } | null>(null);
+  // True while handleSubmit is in its synchronous parse/setup window before
+  // any agent has been marked in-flight. Without this gate, a second submit
+  // in the same tick could race past classifySubmit because busy is still
+  // false. Treated as part of `busy` for classification.
+  const [preparing, setPreparing] = useState(false);
   const [tick, setTick] = useState(0);
+
+  const setInFlightFromRef = useCallback(() => {
+    setInFlight(new Set(inFlightRef.current));
+  }, []);
+  const markInFlight = useCallback(
+    (name: string) => {
+      inFlightRef.current.add(name);
+      setInFlightFromRef();
+    },
+    [setInFlightFromRef],
+  );
+  const clearInFlight = useCallback(
+    (name: string) => {
+      inFlightRef.current.delete(name);
+      setInFlightFromRef();
+    },
+    [setInFlightFromRef],
+  );
+  const busy = inFlight.size > 0 || preparing;
 
   const sessionStateRef = useRef({
     lastAgent: null as string | null,
@@ -189,8 +239,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     // both in one keystroke matches the "abort everything" mental model;
     // letting Esc leave a queued prompt around would surprise the user the
     // moment the cancel completes and the queue immediately dispatches.
-    if (queuedPromptRef.current !== null) {
-      queuedPromptRef.current = null;
+    if (queuedRef.current !== null) {
+      queuedRef.current = null;
       setQueuedPrompt(null);
     }
     if (activeRuns.length > 0) {
@@ -232,20 +282,26 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   );
 
   const dispatchSingle = useCallback(
-    async (agentName: string, spec: AgentSpec, userPrompt: string, fullPrompt: string) => {
-      const run = newRun(agentName, agentColor[agentName] ?? "cyan");
-      setActiveRuns([run]);
-      setActivePromptText(userPrompt);
+    async (
+      agentName: string,
+      spec: AgentSpec,
+      userPrompt: string,
+      fullPrompt: string,
+      displayPrompt: string,
+    ) => {
+      const run = newRun(agentName, agentColor[agentName] ?? "cyan", displayPrompt);
+      markInFlight(agentName);
+      setActiveRuns((prev) => [...prev, run]);
       const prep = await prepareCommand(agentName, spec, fullPrompt);
       const spawned = spawnProc(prep.args, prep.viaStdin, fullPrompt);
       if (spawned.error) {
         log(spawned.error, "error");
-        setActiveRuns([]);
-        setActivePromptText(null);
+        setActiveRuns((prev) => prev.filter((r) => r !== run));
+        clearInFlight(agentName);
         return null;
       }
       const proc = spawned.proc!;
-      activeProcsRef.current = [spawned];
+      activeProcsRef.current = [...activeProcsRef.current, spawned];
       let activePrep = prep;
       try {
         const result = await streamToRun({
@@ -272,7 +328,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           } else {
             log(`@${agentName} ↻ session expired, retrying with a fresh session`, "warn");
             resetRunForRetry(run, "");
-            activeProcsRef.current = [retrySpawned];
+            activeProcsRef.current = activeProcsRef.current.map((p) =>
+              p === spawned ? retrySpawned : p,
+            );
             activePrep = retryPrep;
             await streamToRun({
               run,
@@ -286,7 +344,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           }
         }
       } finally {
-        activeProcsRef.current = [];
+        activeProcsRef.current = activeProcsRef.current.filter(
+          (p) => p !== spawned && (!("proc" in p) || p.proc !== proc),
+        );
       }
       if (!run.cancelled && !run.interrupted && run.finalStatus === "done") {
         await captureDirSession(agentName, spec, activePrep.dirSnapshot);
@@ -298,18 +358,18 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
       const completed: CompletedTurn = {
         id: nextId(),
-        prompt: userPrompt,
+        prompt: displayPrompt,
         runs: [run],
         task: safeCurrentTask(),
         at: new Date(),
       };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
-      setActiveRuns([]);
-      setActivePromptText(null);
+      setActiveRuns((prev) => prev.filter((r) => r !== run));
+      clearInFlight(agentName);
       if (run.cancelled || run.interrupted) return null;
       return run.responseChunks.join("");
     },
-    [agentColor, log],
+    [agentColor, clearInFlight, log, markInFlight],
   );
 
   const dispatchParallel = useCallback(
@@ -317,15 +377,17 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       agentNames: string[],
       userPrompt: string,
       perAgentFullPrompts: Record<string, string>,
+      displayPrompt: string,
     ) => {
       // Live preview height scales with terminal rows so tall windows show
       // more context per panel. Capped at 24 so very tall screens don't make
       // a single dispatch eat the whole transcript area.
       const rows = process.stdout.rows ?? 30;
       const liveMax = Math.max(8, Math.min(24, Math.floor(rows / 3)));
-      const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", liveMax));
-      setActiveRuns(runs);
-      setActivePromptText(userPrompt);
+      const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", displayPrompt, liveMax));
+      for (const n of agentNames) inFlightRef.current.add(n);
+      setInFlightFromRef();
+      setActiveRuns((prev) => [...prev, ...runs]);
 
       const prepared = await Promise.all(
         agentNames.map(async (name, i) => {
@@ -337,54 +399,66 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }),
       );
 
-      activeProcsRef.current = prepared.map((p) => p.spawned);
+      activeProcsRef.current = [...activeProcsRef.current, ...prepared.map((p) => p.spawned)];
 
       await Promise.all(
-        prepared.map(async (p, i) => {
-          if (p.spawned.error) {
-            p.run.running = false;
-            p.run.finalStatus = p.spawned.error;
-            p.run.end = Date.now();
-            return;
+        prepared.map(async (p) => {
+          try {
+            if (p.spawned.error) {
+              p.run.running = false;
+              p.run.finalStatus = p.spawned.error;
+              p.run.end = Date.now();
+              return;
+            }
+            const result = await streamToRun({
+              run: p.run,
+              proc: p.spawned.proc!,
+              parser: p.prep.parser,
+              agentName: p.name,
+              preGen: p.prep.preGen,
+              sessionId: p.prep.sessionId,
+              verbose: sessionStateRef.current.verbose,
+            });
+            const recoverable =
+              result.sessionInvalid &&
+              result.exitCode !== 0 &&
+              !p.run.cancelled &&
+              !p.run.interrupted &&
+              Boolean(p.spec.resume_template);
+            if (!recoverable) return;
+            const fullPrompt = perAgentFullPrompts[p.name]!;
+            await clearAgentSession(p.name);
+            const retryPrep = await prepareCommand(p.name, p.spec, fullPrompt);
+            const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
+            if (retrySpawned.error) {
+              log(`@${p.name} session expired and retry failed: ${retrySpawned.error}`, "error");
+              return;
+            }
+            log(`@${p.name} ↻ session expired, retrying with a fresh session`, "warn");
+            resetRunForRetry(p.run, "");
+            const originalSpawned = p.spawned;
+            p.spawned = retrySpawned;
+            p.prep = retryPrep;
+            activeProcsRef.current = activeProcsRef.current.map((sp) =>
+              sp === originalSpawned ? retrySpawned : sp,
+            );
+            await streamToRun({
+              run: p.run,
+              proc: retrySpawned.proc!,
+              parser: retryPrep.parser,
+              agentName: p.name,
+              preGen: retryPrep.preGen,
+              sessionId: retryPrep.sessionId,
+              verbose: sessionStateRef.current.verbose,
+            });
+          } finally {
+            // Free this agent for the queue drain the moment it idles, even
+            // though the parallel batch's CompletedTurn isn't committed yet
+            // (we wait for siblings). The panel stays visible in activeRuns
+            // until the whole batch commits below; clearInFlight just lets
+            // the next queued prompt fire on this agent in the meantime.
+            clearInFlight(p.name);
           }
-          const result = await streamToRun({
-            run: p.run,
-            proc: p.spawned.proc!,
-            parser: p.prep.parser,
-            agentName: p.name,
-            preGen: p.prep.preGen,
-            sessionId: p.prep.sessionId,
-            verbose: sessionStateRef.current.verbose,
-          });
-          const recoverable =
-            result.sessionInvalid &&
-            result.exitCode !== 0 &&
-            !p.run.cancelled &&
-            !p.run.interrupted &&
-            Boolean(p.spec.resume_template);
-          if (!recoverable) return;
-          const fullPrompt = perAgentFullPrompts[p.name]!;
-          await clearAgentSession(p.name);
-          const retryPrep = await prepareCommand(p.name, p.spec, fullPrompt);
-          const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
-          if (retrySpawned.error) {
-            log(`@${p.name} session expired and retry failed: ${retrySpawned.error}`, "error");
-            return;
-          }
-          log(`@${p.name} ↻ session expired, retrying with a fresh session`, "warn");
-          resetRunForRetry(p.run, "");
-          p.spawned = retrySpawned;
-          p.prep = retryPrep;
-          activeProcsRef.current[i] = retrySpawned;
-          await streamToRun({
-            run: p.run,
-            proc: retrySpawned.proc!,
-            parser: retryPrep.parser,
-            agentName: p.name,
-            preGen: retryPrep.preGen,
-            sessionId: retryPrep.sessionId,
-            verbose: sessionStateRef.current.verbose,
-          });
         }),
       );
 
@@ -395,7 +469,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       for (const p of prepared) {
         if (p.spec.parser !== "agy-text") p.run.liveMaxLines = null;
       }
-      activeProcsRef.current = [];
+      const ourSpawns = new Set(prepared.map((p) => p.spawned));
+      activeProcsRef.current = activeProcsRef.current.filter((sp) => !ourSpawns.has(sp));
 
       for (const p of prepared) {
         if (
@@ -424,14 +499,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
       const completed: CompletedTurn = {
         id: nextId(),
-        prompt: userPrompt,
+        prompt: displayPrompt,
         runs,
         task: safeCurrentTask(),
         at: new Date(),
       };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
-      setActiveRuns([]);
-      setActivePromptText(null);
+      const ourRuns = new Set(runs);
+      setActiveRuns((prev) => prev.filter((r) => !ourRuns.has(r)));
 
       for (const p of prepared) {
         if (!p.spawned.error && !p.run.cancelled && !p.run.interrupted) {
@@ -456,12 +531,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         log(`resume in agent's own CLI (new window):  ${openable.join("  ·  ")}`);
       }
     },
-    [agentColor, config.agents, log],
+    [agentColor, clearInFlight, config.agents, log, setInFlightFromRef],
   );
 
   const resetVisibleTaskState = useCallback((message: string): void => {
     setActiveRuns([]);
-    setActivePromptText(null);
     const state = sessionStateRef.current;
     state.pendingPrompt = null;
     // pendingImages are intentionally preserved: they're a per-process queue
@@ -908,12 +982,150 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     [config, log, resetVisibleTaskState],
   );
 
+  // Dispatch a single pre-resolved queued item. Mirrors the single-agent tail
+  // of the main dispatch path: ensure task → buildContext against the latest
+  // transcripts → dispatchSingle → appendTurn. Drained per-agent so each
+  // queued target fires the instant its agent idles, regardless of siblings.
+  const dispatchQueuedItem = useCallback(
+    async (item: QueuedItem) => {
+      try {
+        await ensureActiveTask();
+        await maybeAutoRenameProvisional(item.userPrompt);
+        const ctx = buildContext(item.agent, config.agents, config.context_turns ?? 3);
+        const fullPrompt = ctx ? ctx + item.userPrompt : item.userPrompt;
+        const response = await dispatchSingle(
+          item.agent,
+          item.spec,
+          item.userPrompt,
+          fullPrompt,
+          item.displayPrompt,
+        );
+        if (response !== null) {
+          await appendTurn(item.agent, item.userPrompt, response);
+          if (item.spec.open_template && sessionStateRef.current.lastStatus === "done") {
+            log(`/open ${item.agent} to resume in ${item.agent}'s own CLI (new window)`);
+          }
+        }
+      } catch (e: any) {
+        log(`@${item.agent} queued dispatch failed: ${e?.message ?? e}`, "error");
+      }
+    },
+    [config.agents, config.context_turns, dispatchSingle, ensureActiveTask, log, maybeAutoRenameProvisional],
+  );
+
+  // Parse a line into per-agent dispatch items. Same routing/multi/@all
+  // semantics as the main dispatch path; centralized here so the queue stores
+  // a stable plan (images already baked into userPrompt, pendingPrompt
+  // folded, agent list pinned) and the drain doesn't have to re-derive.
+  // Returns null when nothing dispatchable (already logged the reason).
+  const parseLineToItems = useCallback(
+    (line: string): QueuedItem[] | null => {
+      let expanded = line;
+      const state = sessionStateRef.current;
+      if (ALL_TOKEN.test(line.trimStart())) {
+        const available = availableAgentNames(config.agents);
+        const unavail = unavailableAgentReasons(config.agents);
+        const skipped = agents.filter((n) => unavail[n]);
+        if (skipped.length) pushSkipped(skipped, unavail);
+        if (available.length === 0) {
+          log("no available CLI agents for @all", "warn");
+          return null;
+        }
+        const allBody = line.trimStart().replace(ALL_TOKEN, "").trim();
+        let lineForExpand = line;
+        if (!allBody && state.pendingPrompt) {
+          lineForExpand = `@all ${state.pendingPrompt}`;
+        }
+        state.pendingPrompt = null;
+        expanded = expandAll(lineForExpand, available);
+      } else {
+        expanded = expandAll(line, agents);
+      }
+
+      const multi = parseMulti(expanded, agents);
+      if (multi && multi.body) {
+        const { images: extracted, cleaned } = extractImagePaths(multi.body);
+        const allImages = [...state.pendingImages, ...extracted];
+        const userPrompt = formatPromptWithImages(cleaned, allImages);
+        if (allImages.length) {
+          log(
+            `attaching ${allImages.length} image(s) to ${multi.agents.map((a) => "@" + a).join(", ")}`,
+          );
+        }
+        state.pendingImages = [];
+        const tagPrefix = multi.agents.map((a) => `@${a}`).join(" ");
+        const displayPrompt = userPrompt ? `${tagPrefix} ${userPrompt}` : tagPrefix;
+        return multi.agents
+          .filter((a) => config.agents[a] && agentIsEnabled(config.agents[a]!))
+          .map((a) => ({ agent: a, userPrompt, displayPrompt, spec: config.agents[a]! }));
+      }
+      if (multi && !multi.body) {
+        log("multi-dispatch needs a prompt after the agent list");
+        return null;
+      }
+
+      const routingState = {
+        get pendingPrompt() {
+          return state.pendingPrompt;
+        },
+        set pendingPrompt(v: string | null) {
+          state.pendingPrompt = v;
+        },
+      };
+      const routed = prepareDispatchLine(expanded, agents, routingState);
+      if (routed === null) {
+        const choices = agents.map((n) => "@" + n).join(" ");
+        const suffix = state.pendingPrompt ? " Type one of those tags to send it." : "";
+        log(`no agent tagged. Pick one: ${choices}.${suffix}`, "warn");
+        return null;
+      }
+      const parsed = parseLine(routed);
+      if (parsed.kind === "empty") return null;
+      if (parsed.kind === "command") {
+        // Slash commands are rejected upstream when busy; if we got here,
+        // the caller should run handleSlash itself. Queue path doesn't reach.
+        return null;
+      }
+      if (parsed.kind === "untagged") {
+        const choices = agents.map((n) => "@" + n).join(" ");
+        log(`no agent tagged. Pick one: ${choices}.`, "warn");
+        return null;
+      }
+      const agent = parsed.agent;
+      if (!config.agents[agent]) {
+        log(`unknown agent: @${agent} (try /agents)`, "error");
+        return null;
+      }
+      if (!agentIsEnabled(config.agents[agent]!)) {
+        log(`@${agent} is disabled. Run /agents enable ${agent} to use it.`, "warn");
+        return null;
+      }
+      const { images: extracted, cleaned } = extractImagePaths(parsed.content);
+      const allImages = [...state.pendingImages, ...extracted];
+      if (!cleaned.trim() && allImages.length === 0) {
+        log("empty prompt");
+        return null;
+      }
+      const userPrompt = formatPromptWithImages(cleaned, allImages);
+      if (allImages.length) log(`attaching ${allImages.length} image(s) to @${agent}`);
+      state.pendingImages = [];
+      const displayPrompt = userPrompt ? `@${agent} ${userPrompt}` : `@${agent}`;
+      return [{ agent, userPrompt, displayPrompt, spec: config.agents[agent]! }];
+    },
+    [agents, config.agents, log, pushSkipped],
+  );
+
   const handleSubmit = useCallback(
     async (line: string) => {
       if (!line.trim()) {
         setInput("");
         return;
       }
+      // Record in prompt history before any routing decision so even queued or
+      // rejected lines are recallable. Dedup against the most recent entry so
+      // accidental double-submits don't clutter the file.
+      setPromptHistory((prev) => (prev[prev.length - 1] === line ? prev : [...prev, line]));
+      appendPromptHistory(line);
       const decision = classifySubmit(line, busy);
       if (decision === "reject-slash") {
         log(
@@ -924,12 +1136,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       }
       if (decision === "queue") {
         setInput("");
-        queuedPromptRef.current = line;
+        const items = parseLineToItems(line);
+        if (items === null || items.length === 0) return;
+        queuedRef.current = { line, items, delivered: new Set() };
         setQueuedPrompt(line);
         return;
       }
       setInput("");
-      setBusy(true);
+      setPreparing(true);
       try {
         let expanded = line;
         if (ALL_TOKEN.test(line.trimStart())) {
@@ -943,7 +1157,18 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             log("no available CLI agents for @all", "warn");
             return;
           }
-          expanded = expandAll(line, available);
+          // Mirror prepareDispatchLine's pending-prompt merge: if the user
+          // typed a bare `@all` after a "no agent tagged" warning, fold the
+          // saved prompt into the @all body. Either way (bare or with body),
+          // clear pendingPrompt now that @all is being dispatched.
+          const allState = sessionStateRef.current;
+          const allBody = line.trimStart().replace(ALL_TOKEN, "").trim();
+          let lineForExpand = line;
+          if (!allBody && allState.pendingPrompt) {
+            lineForExpand = `@all ${allState.pendingPrompt}`;
+          }
+          allState.pendingPrompt = null;
+          expanded = expandAll(lineForExpand, available);
         } else {
           expanded = expandAll(line, agents);
         }
@@ -967,7 +1192,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             const ctx = buildContext(name, config.agents, config.context_turns ?? 3);
             perAgent[name] = ctx ? ctx + userPrompt : userPrompt;
           }
-          await dispatchParallel(multi.agents, userPrompt, perAgent);
+          const tagPrefix = multi.agents.map((a) => `@${a}`).join(" ");
+          const displayPrompt = userPrompt ? `${tagPrefix} ${userPrompt}` : tagPrefix;
+          await dispatchParallel(multi.agents, userPrompt, perAgent, displayPrompt);
           state.pendingImages = [];
           return;
         }
@@ -1042,7 +1269,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         await maybeAutoRenameProvisional(userPrompt);
         const ctx = buildContext(agent, config.agents, config.context_turns ?? 3);
         const fullPrompt = ctx ? ctx + userPrompt : userPrompt;
-        const response = await dispatchSingle(agent, config.agents[agent]!, userPrompt, fullPrompt);
+        const displayPrompt = userPrompt ? `@${agent} ${userPrompt}` : `@${agent}`;
+        const response = await dispatchSingle(
+          agent,
+          config.agents[agent]!,
+          userPrompt,
+          fullPrompt,
+          displayPrompt,
+        );
         state.pendingImages = [];
         if (response !== null) {
           await appendTurn(agent, userPrompt, response);
@@ -1052,7 +1286,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           }
         }
       } finally {
-        setBusy(false);
+        setPreparing(false);
       }
     },
     [
@@ -1066,22 +1300,31 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       handleSlash,
       log,
       maybeAutoRenameProvisional,
+      parseLineToItems,
       pushSkipped,
     ],
   );
 
-  // Drain the queue when the in-flight dispatch finishes. The ref is the
-  // source of truth (cleared first) so a stale effect re-fire — for example
-  // when handleSubmit's identity changes due to a config update — sees a
-  // null queue and no-ops rather than dispatching the same prompt twice.
+  // Drain the queue per-agent. Fires on every inFlight transition (and on
+  // queuedPrompt change so a fresh queue is considered immediately). For each
+  // target item, if its agent isn't already delivered or in flight, mark it
+  // delivered synchronously (before awaiting the async dispatch) so a second
+  // effect run on the same tick can't double-dispatch. Clears the queue once
+  // every target has been served.
   useEffect(() => {
-    if (busy) return;
-    const pending = queuedPromptRef.current;
-    if (pending === null) return;
-    queuedPromptRef.current = null;
-    setQueuedPrompt(null);
-    void handleSubmit(pending);
-  }, [busy, handleSubmit]);
+    const q = queuedRef.current;
+    if (q === null) return;
+    for (const item of q.items) {
+      if (q.delivered.has(item.agent)) continue;
+      if (inFlightRef.current.has(item.agent)) continue;
+      q.delivered.add(item.agent);
+      void dispatchQueuedItem(item);
+    }
+    if (q.delivered.size >= q.items.length) {
+      queuedRef.current = null;
+      setQueuedPrompt(null);
+    }
+  }, [inFlight, queuedPrompt, dispatchQueuedItem]);
 
   const toolbarState = {
     lastAgent: sessionStateRef.current.lastAgent,
@@ -1153,12 +1396,47 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           );
         }}
       </Static>
-      {activePromptText !== null && <UserPrompt prompt={activePromptText} />}
-      <PanelRow runs={activeRuns} tick={tick} keyPrefix="live" />
+      {(() => {
+        // Group consecutive runs that share a prompt so the live area renders
+        // one UserPrompt header per concurrent dispatch. The normal single
+        // dispatch and the unstaggered @all case collapse to a single group
+        // (matches the prior single-header look); a staggered queued dispatch
+        // gets its own header beneath the still-running prior group.
+        if (activeRuns.length === 0) return null;
+        const groups: Array<{ prompt: string; runs: AgentRunState[] }> = [];
+        for (const r of activeRuns) {
+          const last = groups[groups.length - 1];
+          if (last && last.prompt === r.prompt) {
+            last.runs.push(r);
+          } else {
+            groups.push({ prompt: r.prompt, runs: [r] });
+          }
+        }
+        return groups.map((g, i) => (
+          <Box key={`live-group-${i}`} flexDirection="column">
+            <UserPrompt prompt={g.prompt} />
+            <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} />
+          </Box>
+        ));
+      })()}
       {queuedPrompt !== null && (
-        <Text dimColor>
-          {`  queued: ${formatQueuePreview(queuedPrompt, 60)}  (Esc to clear)`}
-        </Text>
+        <Box flexDirection="column">
+          {(() => {
+            const prefix = "  queued: ";
+            const continuation = " ".repeat(prefix.length);
+            const suffix = "  (Esc to clear)";
+            const previewWidth = Math.max(1, cols - prefix.length - suffix.length);
+            const lines = formatQueuePreview(queuedPrompt, previewWidth);
+            return lines.map((line, i) => {
+              const isLast = i === lines.length - 1;
+              return (
+                <Text key={i} dimColor>
+                  {`${i === 0 ? prefix : continuation}${line}${isLast ? suffix : ""}`}
+                </Text>
+              );
+            });
+          })()}
+        </Box>
       )}
       <Box marginTop={1}>
         <MultilineInput
@@ -1168,6 +1446,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           disabled={busy}
           slashCommands={SLASH_COMMANDS}
           agents={agents}
+          history={promptHistory}
         />
       </Box>
       <BottomToolbar state={toolbarState} />

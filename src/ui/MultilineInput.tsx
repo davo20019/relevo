@@ -1,5 +1,7 @@
 import { Box, Text, useInput } from "ink";
-import { useEffect, useMemo, useState } from "react";
+import path from "node:path";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { IMAGE_TOKEN } from "../images.js";
 import {
   applySuggestion,
   filterSuggestions,
@@ -9,6 +11,7 @@ import {
 
 // 4-frame dot cycle matching AgentPanel's "waiting" animation cadence.
 const RUNNING_DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
+const PASTE_COMPACT_THRESHOLD = 200;
 
 type Props = {
   value: string;
@@ -17,6 +20,7 @@ type Props = {
   disabled: boolean;
   slashCommands: readonly string[];
   agents: readonly string[];
+  history: readonly string[];
 };
 
 // A multi-line input with a visible cursor, emacs-style shortcuts, and an
@@ -39,11 +43,19 @@ export function MultilineInput({
   disabled,
   slashCommands,
   agents,
+  history,
 }: Props) {
   const [cursor, setCursor] = useState(value.length);
   const [selected, setSelected] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
   const [runningFrame, setRunningFrame] = useState(0);
+  // Position in `history` while walking with Up/Down. null = live draft.
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  // The live buffer the user was typing before entering history mode, restored
+  // when they walk past the most recent entry with Down.
+  const [draft, setDraft] = useState("");
+  const pastedTextByPlaceholder = useRef(new Map<string, string>());
+  const pastedTextCounter = useRef(0);
 
   useEffect(() => {
     if (!disabled) return;
@@ -67,8 +79,51 @@ export function MultilineInput({
   const setText = (next: string, nextCursor: number) => {
     setAcDismissed(false);
     setSelected(0);
+    setHistoryIndex(null);
+    setDraft("");
+    // Drop map entries whose placeholder no longer appears intact in the
+    // buffer (e.g. after Ctrl+W chopped through one). Otherwise stale entries
+    // would linger and the user might see a half-eaten `[Pasted ...` fragment
+    // that no expansion can fix.
+    for (const key of Array.from(pastedTextByPlaceholder.current.keys())) {
+      if (!next.includes(key)) pastedTextByPlaceholder.current.delete(key);
+    }
     onChange(next);
     setCursor(nextCursor);
+  };
+
+  const recallHistoryEntry = (index: number, savedDraft: string | null) => {
+    if (index < 0 || index >= history.length) return;
+    const entry = history[index]!;
+    if (savedDraft !== null) setDraft(savedDraft);
+    setHistoryIndex(index);
+    setAcDismissed(true);
+    setSelected(0);
+    onChange(entry);
+    setCursor(entry.length);
+  };
+
+  const exitHistoryToDraft = () => {
+    setHistoryIndex(null);
+    setAcDismissed(false);
+    setSelected(0);
+    onChange(draft);
+    setCursor(draft.length);
+    setDraft("");
+  };
+
+  const insertText = (inserted: string) => {
+    // Snap to the placeholder's right edge so typing inside a paste token
+    // pushes characters to its end rather than splitting `[Pasted ...]` into
+    // a fragment that expansion can never restore.
+    const inside = findPlaceholderAtCursor(
+      value,
+      safeCursor,
+      pastedTextByPlaceholder.current.keys(),
+    );
+    const pos = inside ? inside.end : safeCursor;
+    const next = value.slice(0, pos) + inserted + value.slice(pos);
+    setText(next, pos + inserted.length);
   };
 
   const acceptSuggestion = () => {
@@ -83,6 +138,30 @@ export function MultilineInput({
 
   useInput(
     (rawInput, key) => {
+      if (rawInput && !key.ctrl && !key.meta) {
+        // Drag-and-dropped image paths usually arrive as one rawInput chunk
+        // that's well under PASTE_COMPACT_THRESHOLD, so the generic paste
+        // compactor leaves them in the buffer verbatim. The long path then
+        // soft-wraps as the user types and the live area drifts downward on
+        // each redraw. Detect the path on insert and swap it for a short
+        // placeholder; expansion at submit feeds the original back to
+        // extractImagePaths as if nothing changed.
+        const asImage = compactDroppedImageInput(rawInput, pastedTextCounter.current + 1);
+        if (asImage) {
+          pastedTextCounter.current += 1;
+          pastedTextByPlaceholder.current.set(asImage.placeholder, asImage.original);
+          insertText(asImage.placeholder);
+          return;
+        }
+        const compacted = compactPastedInput(rawInput, pastedTextCounter.current + 1);
+        if (compacted) {
+          pastedTextCounter.current += 1;
+          pastedTextByPlaceholder.current.set(compacted.placeholder, compacted.original);
+          insertText(compacted.placeholder);
+          return;
+        }
+      }
+
       if (acOpen) {
         if (key.upArrow) {
           setSelected((s) => (s - 1 + suggestions.length) % suggestions.length);
@@ -105,6 +184,7 @@ export function MultilineInput({
           return;
         }
       } else if (key.escape) {
+        pastedTextByPlaceholder.current.clear();
         setText("", 0);
         return;
       }
@@ -120,10 +200,13 @@ export function MultilineInput({
           return;
         }
         if (!value.trim()) return;
-        onSubmit(value);
+        onSubmit(expandPastedPlaceholders(value, pastedTextByPlaceholder.current.entries()));
+        pastedTextByPlaceholder.current.clear();
         setCursor(0);
         setSelected(0);
         setAcDismissed(false);
+        setHistoryIndex(null);
+        setDraft("");
         return;
       }
 
@@ -133,18 +216,55 @@ export function MultilineInput({
       }
 
       if (key.leftArrow) {
-        setCursor((c) => Math.max(0, c - 1));
+        setCursor((c) => {
+          if (c === 0) return 0;
+          const inside = findPlaceholderAtCursor(
+            value,
+            c - 1,
+            pastedTextByPlaceholder.current.keys(),
+          );
+          return inside ? inside.start : c - 1;
+        });
         return;
       }
       if (key.rightArrow) {
-        setCursor((c) => Math.min(value.length, c + 1));
+        setCursor((c) => {
+          if (c >= value.length) return value.length;
+          const inside = findPlaceholderAtCursor(
+            value,
+            c + 1,
+            pastedTextByPlaceholder.current.keys(),
+          );
+          return inside ? inside.end : c + 1;
+        });
         return;
       }
       if (key.upArrow) {
+        // Shell-style history recall: on the first line of the buffer, Up
+        // walks backward through previously submitted prompts. Anywhere else
+        // it moves the cursor up a visual line as usual.
+        if (lineStart(value, safeCursor) === 0 && history.length > 0) {
+          if (historyIndex === null) {
+            recallHistoryEntry(history.length - 1, value);
+          } else if (historyIndex > 0) {
+            recallHistoryEntry(historyIndex - 1, null);
+          }
+          return;
+        }
         setCursor((c) => moveLine(value, c, -1));
         return;
       }
       if (key.downArrow) {
+        // Symmetric to Up: on the last line, Down walks forward through
+        // history, eventually restoring the live draft the user was typing.
+        if (historyIndex !== null && lineEnd(value, safeCursor) === value.length) {
+          if (historyIndex < history.length - 1) {
+            recallHistoryEntry(historyIndex + 1, null);
+          } else {
+            exitHistoryToDraft();
+          }
+          return;
+        }
         setCursor((c) => moveLine(value, c, +1));
         return;
       }
@@ -159,6 +279,16 @@ export function MultilineInput({
 
       if (key.backspace || key.delete) {
         if (safeCursor === 0) return;
+        const deletedPlaceholder = deletePastedPlaceholderBackward(
+          value,
+          safeCursor,
+          pastedTextByPlaceholder.current.keys(),
+        );
+        if (deletedPlaceholder) {
+          pastedTextByPlaceholder.current.delete(deletedPlaceholder.placeholder);
+          setText(deletedPlaceholder.value, deletedPlaceholder.cursor);
+          return;
+        }
         const next = value.slice(0, safeCursor - 1) + value.slice(safeCursor);
         setText(next, safeCursor - 1);
         return;
@@ -182,8 +312,7 @@ export function MultilineInput({
       }
 
       if (rawInput && !key.ctrl && !key.meta) {
-        const next = value.slice(0, safeCursor) + rawInput + value.slice(safeCursor);
-        setText(next, safeCursor + rawInput.length);
+        insertText(rawInput);
         return;
       }
     },
@@ -233,6 +362,94 @@ export function MultilineInput({
       )}
     </Box>
   );
+}
+
+export function compactPastedInput(
+  rawInput: string,
+  id: number,
+): { placeholder: string; original: string } | null {
+  const lineBreaks = rawInput.match(/\r\n|\r|\n/g);
+  if (!lineBreaks && rawInput.length <= PASTE_COMPACT_THRESHOLD) return null;
+
+  const summary = lineBreaks
+    ? `${lineBreaks.length + 1} lines`
+    : `${rawInput.length} chars`;
+
+  return {
+    placeholder: `[Pasted #${id}, ${summary}]`,
+    original: rawInput,
+  };
+}
+
+export function compactDroppedImageInput(
+  rawInput: string,
+  id: number,
+): { placeholder: string; original: string } | null {
+  const names: string[] = [];
+  for (const m of rawInput.matchAll(IMAGE_TOKEN)) {
+    const raw = m[1] ?? m[2] ?? m[3];
+    if (!raw) continue;
+    const unescaped = raw.replace(/\\(.)/g, "$1");
+    names.push(path.basename(unescaped));
+  }
+  if (names.length === 0) return null;
+
+  const summary = names.length === 1 ? names[0]! : `${names.length} images`;
+  return {
+    placeholder: `[Image #${id}, ${summary}]`,
+    original: rawInput,
+  };
+}
+
+export function expandPastedPlaceholders(
+  value: string,
+  pastedTextEntries: Iterable<readonly [string, string]>,
+): string {
+  let expanded = value;
+  for (const [placeholder, original] of pastedTextEntries) {
+    expanded = expanded.split(placeholder).join(original);
+  }
+  return expanded;
+}
+
+export function findPlaceholderAtCursor(
+  value: string,
+  cursor: number,
+  placeholders: Iterable<string>,
+): { start: number; end: number; placeholder: string } | null {
+  for (const placeholder of placeholders) {
+    let start = value.indexOf(placeholder);
+    while (start !== -1) {
+      const end = start + placeholder.length;
+      if (cursor > start && cursor < end) {
+        return { start, end, placeholder };
+      }
+      start = value.indexOf(placeholder, end);
+    }
+  }
+  return null;
+}
+
+export function deletePastedPlaceholderBackward(
+  value: string,
+  cursor: number,
+  placeholders: Iterable<string>,
+): { value: string; cursor: number; placeholder: string } | null {
+  for (const placeholder of placeholders) {
+    let start = value.indexOf(placeholder);
+    while (start !== -1) {
+      const end = start + placeholder.length;
+      if (cursor > start && cursor <= end) {
+        return {
+          value: value.slice(0, start) + value.slice(end),
+          cursor: start,
+          placeholder,
+        };
+      }
+      start = value.indexOf(placeholder, end);
+    }
+  }
+  return null;
 }
 
 function renderBuffer(value: string, cursor: number, disabled: boolean, runningFrame: number) {
