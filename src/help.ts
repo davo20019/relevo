@@ -29,6 +29,9 @@ Usage:
   /resume             list recent tasks; /resume <n> to pick one
 
   /open <agent>       open agent's CLI natively in a new window, resumed at this session
+  /focus <agent>      show only one agent's live output
+  /focus              show all live output
+  /sync [@agents...]  reserved; task-state sync is not implemented yet
 
   /image <path>       queue an image to attach to the next dispatch
   /image paste        paste clipboard image (requires \`brew install pngpaste\`)

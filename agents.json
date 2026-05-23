@@ -15,7 +15,7 @@
       "parser": "codex-json"
     },
     "cursor": {
-      "enabled": false,
+      "enabled": true,
       "cmd": "agent -p --force --model auto --output-format stream-json {prompt}",
       "init_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",
       "resume_template": "agent -p --force --model auto --output-format stream-json --resume {session_id} {prompt}",

@@ -96,6 +96,8 @@ export const SLASH_COMMANDS = [
   "/quiet",
   "/task",
   "/open",
+  "/focus",
+  "/sync",
   "/image",
   "/exit",
   "/quit",

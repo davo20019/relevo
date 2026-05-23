@@ -2,6 +2,9 @@ import type { AgentSpec } from "./config.js";
 import { loadSessions } from "./sessions.js";
 import { readLastTurns } from "./transcripts.js";
 
+/** How many recent turns to inject from other agents (handoff context). */
+export const PEER_CONTEXT_TURNS = 1;
+
 export function buildContext(
   targetAgent: string,
   agentSpecs: Record<string, AgentSpec>,
@@ -18,7 +21,8 @@ export function buildContext(
       const hasNative = Boolean(spec.resume_template) && Boolean(sessions[name]);
       if (hasNative) continue;
     }
-    const recent = readLastTurns(name, nTurns);
+    const turns = name === targetAgent ? nTurns : PEER_CONTEXT_TURNS;
+    const recent = readLastTurns(name, turns);
     if (recent.trim()) {
       const label = name === targetAgent ? "your own prior turns" : `@${name}`;
       chunks.push(`--- Recent activity from ${label} ---\n${recent}`);

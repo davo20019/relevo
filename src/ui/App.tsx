@@ -47,6 +47,7 @@ import { appendPromptHistory, loadPromptHistory } from "../prompt-history.js";
 import { BottomToolbar } from "./BottomToolbar.js";
 import { MultilineInput } from "./MultilineInput.js";
 import { colorizeAgentMentions } from "./colorizeAgents.js";
+import { filterFocusedRuns } from "./focus.js";
 import { PanelRow } from "./PanelRow.js";
 import { Separator } from "./Separator.js";
 import { buildSkippedBlock, type SkippedLine } from "./skipped.js";
@@ -114,6 +115,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeRuns, setActiveRuns] = useState<AgentRunState[]>([]);
   const [input, setInput] = useState("");
+  const [focusAgent, setFocusAgent] = useState<string | null>(null);
   // Submitted-prompt history for the input's Up/Down recall. Loaded once from
   // disk on mount; appended whenever a non-empty line is submitted.
   const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory());
@@ -694,6 +696,28 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       if (trimmed === "/open" || trimmed.startsWith("/open ")) {
         const rest = trimmed.replace(/^\/open\s*/, "");
         await handleOpenCommand(rest);
+        return true;
+      }
+      if (trimmed === "/focus" || trimmed.startsWith("/focus ")) {
+        const rest = trimmed.replace(/^\/focus\s*/, "").replace(/^@/, "").trim();
+        if (!rest) {
+          setFocusAgent(null);
+          log("showing all live agent output");
+          return true;
+        }
+        if (!config.agents[rest]) {
+          log(`unknown agent: @${rest} (try /agents)`, "error");
+          return true;
+        }
+        setFocusAgent(rest);
+        log(`focused live output on @${rest}; use /focus to show all`);
+        return true;
+      }
+      if (trimmed === "/sync" || trimmed.startsWith("/sync ")) {
+        log(
+          "/sync is reserved for task-state rebroadcasting, but it is not implemented yet.",
+          "warn",
+        );
         return true;
       }
       if (trimmed === "/image" || trimmed.startsWith("/image ")) {
@@ -1403,8 +1427,16 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         // (matches the prior single-header look); a staggered queued dispatch
         // gets its own header beneath the still-running prior group.
         if (activeRuns.length === 0) return null;
+        const visibleActiveRuns = filterFocusedRuns(activeRuns, focusAgent);
+        if (focusAgent && visibleActiveRuns.length === 0) {
+          return (
+            <Text dimColor>
+              focused on @{focusAgent}; no live output from that agent right now
+            </Text>
+          );
+        }
         const groups: Array<{ prompt: string; runs: AgentRunState[] }> = [];
-        for (const r of activeRuns) {
+        for (const r of visibleActiveRuns) {
           const last = groups[groups.length - 1];
           if (last && last.prompt === r.prompt) {
             last.runs.push(r);

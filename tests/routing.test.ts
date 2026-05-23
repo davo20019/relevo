@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   expandAll,
+  isKnownCommand,
   parseLine,
   parseMulti,
   prepareDispatchLine,
@@ -71,6 +72,20 @@ describe("smartRoute", () => {
 
   it("leaves slash commands alone even with @ tokens inside", () => {
     expect(smartRoute("/help @a", ["a"])).toBe("/help @a");
+  });
+});
+
+describe("new slash commands", () => {
+  it("recognizes /focus as a slash command", () => {
+    expect(isKnownCommand("/focus @claude")).toBe(true);
+    expect(smartRoute("/focus @claude", ["claude"])).toBe("/focus @claude");
+  });
+
+  it("recognizes /sync as a slash command", () => {
+    expect(isKnownCommand("/sync @claude @codex")).toBe(true);
+    expect(smartRoute("/sync @claude @codex", ["claude", "codex"])).toBe(
+      "/sync @claude @codex",
+    );
   });
 });
 

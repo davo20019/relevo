@@ -81,8 +81,9 @@ npm run dev   # or: npm run build && npm start
 - If you submit a prompt without an agent tag, relevo keeps it pending and
   asks you to pick an agent. Type `@codex` or another agent tag to send that
   saved prompt.
-- Recent transcript turns, default 3, are prepended as context. For agents
-  without native sessions, this can include their own prior turns.
+- The last turn from each other agent is prepended as handoff context. For agents
+  without native sessions, up to `context_turns` (default 3) of their own prior
+  turns are also included.
 - Each agent runs in your current working directory, exactly as if you had typed
   the CLI command directly. They share files in that directory.
 - Per-project state lives in `./.relay/`. Add it to your project's `.gitignore`.
@@ -99,6 +100,33 @@ npm run dev   # or: npm run build && npm start
 - Claude, Codex, Cursor, and agy have native session support by default. They
   keep their own conversation memory across turns; transcript replay is the
   fallback for other agents.
+
+## Task Workspace Model
+
+One relevo terminal represents one task. Agents inside that terminal share the
+same working directory and task transcripts. Use `@agent` mentions to route
+prompts to one or more collaborators in that task.
+
+Relevo keeps chronological scrollback as the source of truth. `/focus <agent>`
+narrows live output while a run is active, but historical output remains in the
+normal task scrollback.
+
+## Worktrees
+
+Relevo's default is one terminal per task in the current working directory. Use a
+git worktree when the task itself needs isolation, such as a risky refactor,
+dependency upgrade, migration, or competing implementation attempt.
+
+Do not create a separate worktree per agent unless you intentionally want
+isolated experiments that you will merge yourself.
+
+Recommended workflow:
+
+```bash
+git worktree add ../my-project-feature feature/my-project-feature
+cd ../my-project-feature
+relevo
+```
 
 ## Slash Commands
 
@@ -117,6 +145,9 @@ npm run dev   # or: npm run build && npm start
 | `/task rename <new>` | rename the current task |
 | `/resume` | list recent tasks; `/resume <n>` switches to one |
 | `/open <agent>` | open a resumable native session in a new terminal window |
+| `/focus <agent>` | show only one agent's live output |
+| `/focus` | show all live output |
+| `/sync [@agents...]` | reserved for task-state rebroadcasting; not implemented yet |
 | `/image <path>` | queue an image file for the next dispatch |
 | `/image paste` | queue the clipboard image, requires `pngpaste` |
 | `/image list` | show queued images |
@@ -216,8 +247,9 @@ To add another CLI, merge new entries into the existing `agents` object:
   `cursor-json` so relevo can filter event-streamed JSON into messages,
   command counts, edit counts, and session IDs. `agy-text` is a heuristic parser
   for Antigravity's text output.
-- `context_turns` controls how many recent turns are injected when you call an
-  agent. For agents without an active native session, this can include the target agent's own prior turns.
+- `context_turns` controls how many of the target agent's own prior turns are
+  replayed when it has no active native session. Other agents always contribute
+  their latest turn only.
 
 ## Default Agent Notes
 
