@@ -23,13 +23,16 @@ export type AgentConfig = {
 export const DEFAULT_CONFIG: AgentConfig = {
   agents: {
     claude: {
-      cmd: "claude -p --dangerously-skip-permissions {prompt}",
+      // stream-json requires --verbose in -p mode; emits per-event JSON lines
+      // (system init, assistant turns with text + tool_use blocks, final result).
+      cmd: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions {prompt}",
       init_template:
-        "claude -p --session-id {session_id} --dangerously-skip-permissions {prompt}",
+        "claude -p --output-format stream-json --verbose --session-id {session_id} --dangerously-skip-permissions {prompt}",
       resume_template:
-        "claude -p --resume {session_id} --dangerously-skip-permissions {prompt}",
+        "claude -p --output-format stream-json --verbose --resume {session_id} --dangerously-skip-permissions {prompt}",
       open_template: "claude --resume {session_id}",
       pre_generate_id: "uuid",
+      parser: "claude-json",
     },
     codex: {
       // -c sandbox_mode=workspace-write works on BOTH `codex exec` and `codex exec resume`,
@@ -85,6 +88,7 @@ export const SLASH_COMMANDS = [
   "/tail",
   "/clear",
   "/reset",
+  "/resume",
   "/cwd",
   "/pwd",
   "/workspace",

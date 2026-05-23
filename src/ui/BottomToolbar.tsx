@@ -1,7 +1,8 @@
 import { Box, Text, useStdout } from "ink";
 import { useEffect, useState } from "react";
 import os from "node:os";
-import { currentTask, projectDir } from "../paths.js";
+import { projectDir } from "../paths.js";
+import { getActiveTask } from "../tasks.js";
 
 export type ToolbarState = {
   lastAgent: string | null;
@@ -13,7 +14,7 @@ export type ToolbarState = {
 
 export function BottomToolbar({ state }: { state: ToolbarState }) {
   const cols = useTerminalColumns();
-  const left = `task: ${currentTask()}  ·  cwd: ${shortenPath(projectDir())}`;
+  const left = `task: ${getActiveTask() ?? "(no active task)"}  ·  cwd: ${shortenPath(projectDir())}`;
   const rightParts: string[] = [];
   if (state.lastAgent) {
     rightParts.push(

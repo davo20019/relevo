@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getActiveTask, setActiveTask } from "./tasks.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -65,22 +66,16 @@ export function stateDir(): string {
   return path.join(projectDir(), ".relay");
 }
 
-export function currentTaskFile(): string {
-  return path.join(stateDir(), "current");
-}
-
 export function currentTask(): string {
-  const f = currentTaskFile();
-  if (existsSync(f)) {
-    const name = readFileSync(f, "utf8").trim();
-    if (name) return name;
+  const t = getActiveTask();
+  if (!t) {
+    throw new Error("no active task. call setActiveTask first, or use /resume to pick one.");
   }
-  return "default";
+  return t;
 }
 
-export async function setCurrentTask(name: string): Promise<void> {
-  await mkdir(stateDir(), { recursive: true });
-  await writeFile(currentTaskFile(), name + "\n");
+export function setCurrentTask(name: string): void {
+  setActiveTask(name);
 }
 
 export function taskRoot(name?: string): string {
@@ -104,24 +99,8 @@ export function imagesDir(): string {
   return path.join(taskRoot(), "images");
 }
 
-export function listTasks(): string[] {
-  const base = path.join(stateDir(), "tasks");
-  if (!existsSync(base)) return [];
-  return readdirSync(base)
-    .filter((p) => {
-      try {
-        return statSync(path.join(base, p)).isDirectory();
-      } catch {
-        return false;
-      }
-    })
-    .sort();
-}
-
-export async function ensureTask(name?: string): Promise<string> {
-  const n = name ?? currentTask();
-  await mkdir(path.join(taskRoot(n), "transcripts"), { recursive: true });
-  return n;
+export function ensureTask(name: string): Promise<string> {
+  return mkdir(path.join(taskRoot(name), "transcripts"), { recursive: true }).then(() => name);
 }
 
 export function maybeMigrateLegacy(): void {
@@ -134,19 +113,23 @@ export function maybeMigrateLegacy(): void {
       renameSync(legacy, target);
     }
   }
+  // Older versions stored "the current task" in .relay/current. The new model
+  // keeps the active task in memory and ignores this file. Leave it on disk:
+  // an older relevo build still reads it, so deleting it on first launch of
+  // this build would silently break downgrade/rollback. It is harmless here.
 }
 
 export async function ensureDirs(): Promise<void> {
   await mkdir(stateDir(), { recursive: true });
   maybeMigrateLegacy();
-  await ensureTask();
 }
 
 // Synchronous variant used by the bin entry's early --help branch.
 export function ensureDirsSync(): void {
   mkdirSync(stateDir(), { recursive: true });
   maybeMigrateLegacy();
-  mkdirSync(path.join(taskRoot(), "transcripts"), { recursive: true });
+  // Do not create a default task here. New processes intentionally start with
+  // no active task; the first dispatch creates one lazily.
 }
 
 // Touch a file path with content; used by tests.

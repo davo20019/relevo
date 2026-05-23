@@ -1,5 +1,10 @@
 import type { AgentConfig } from "./config.js";
-import { currentTask, projectDir, transcriptDir } from "./paths.js";
+import { projectDir, transcriptDir } from "./paths.js";
+import { getActiveTask } from "./tasks.js";
+
+function safeTranscriptDir(): string {
+  return getActiveTask() ? transcriptDir() : "(none yet)";
+}
 
 export function buildHelpText(config: AgentConfig): string {
   const agents = Object.keys(config.agents)
@@ -17,12 +22,13 @@ Usage:
   /agents disable <agent>      skip an agent from @all
 
   /task               show current task
-  /task list          list all tasks (current is marked *)
+  /task list          list all tasks on disk (current is marked *)
   /task new <name>    create a new task and switch to it
-  /task switch <name> switch to an existing task
-  /task end           end current task, switch back to default
+  /task rename <new>  rename the current task
 
-  /open <agent>       continue an agent's session in a new Terminal window (interactive)
+  /resume             list recent tasks; /resume <n> to pick one
+
+  /open <agent>       open agent's CLI natively in a new window, resumed at this session
 
   /image <path>       queue an image to attach to the next dispatch
   /image paste        paste clipboard image (requires \`brew install pngpaste\`)
@@ -41,8 +47,8 @@ Usage:
   /exit               quit
 
 Agents: ${agents}
-Current task: ${currentTask()}
+Current task: ${getActiveTask() ?? "(none yet; type a prompt to start one)"}
 Working directory: ${projectDir()}
-Transcripts: ${transcriptDir()}
+Transcripts: ${safeTranscriptDir()}
 `;
 }

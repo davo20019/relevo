@@ -1,7 +1,7 @@
 export type ParseKind = "message" | "command" | "edit" | "session_id" | null;
 export type ParseResult = { kind: ParseKind; payload: string | null };
 
-export type LineParser = (line: string) => ParseResult;
+export type LineParser = (line: string) => ParseResult | ParseResult[];
 
 const NULL: ParseResult = { kind: null, payload: null };
 
@@ -151,6 +151,74 @@ export function parserCursorJson(line: string): ParseResult {
   return NULL;
 }
 
+// Tool names whose execution we surface as `edit` events. Anything else gets
+// dropped (Read/Grep/Glob would just be noise; Bash is handled separately).
+const CLAUDE_EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+export function parserClaudeJson(line: string): ParseResult | ParseResult[] {
+  // Filter claude's --output-format stream-json events into typed results.
+  // A single `assistant` event line can carry both text and tool_use blocks,
+  // so this parser returns an array.
+  const stripped = line.trim();
+  if (!stripped) return NULL;
+  let evt: any;
+  try {
+    evt = JSON.parse(stripped);
+  } catch {
+    const low = stripped.toLowerCase();
+    if (low.startsWith("error:") || low.startsWith("usage:")) {
+      return { kind: "message", payload: stripped + "\n" };
+    }
+    return NULL;
+  }
+  const t = evt?.type ?? "";
+  if (t === "system" && evt?.subtype === "init") {
+    const sid = evt?.session_id;
+    if (sid) return { kind: "session_id", payload: String(sid) };
+    return NULL;
+  }
+  if (t === "assistant") {
+    const parts = evt?.message?.content ?? [];
+    if (!Array.isArray(parts)) return NULL;
+    const results: ParseResult[] = [];
+    const textPieces: string[] = [];
+    for (const p of parts) {
+      if (!p || typeof p !== "object") continue;
+      if (p.type === "text" && typeof p.text === "string" && p.text) {
+        textPieces.push(p.text);
+      } else if (p.type === "tool_use") {
+        const name = String(p.name ?? "");
+        const input = p.input ?? {};
+        if (name === "Bash") {
+          const cmd = String(input.command ?? input.description ?? "");
+          if (cmd) {
+            const short = cmd.length <= 120 ? cmd : cmd.slice(0, 117) + "...";
+            results.push({ kind: "command", payload: short });
+          }
+        } else if (CLAUDE_EDIT_TOOLS.has(name)) {
+          const p2 = input.file_path ?? input.notebook_path ?? "";
+          if (p2) results.push({ kind: "edit", payload: String(p2) });
+        }
+      }
+    }
+    if (textPieces.length) {
+      results.unshift({ kind: "message", payload: textPieces.join("") + "\n\n" });
+    }
+    return results.length ? results : NULL;
+  }
+  if (t === "result") {
+    if (evt?.is_error) {
+      const msg = evt?.result ?? evt?.error ?? evt?.message ?? `error (${evt?.subtype ?? "unknown"})`;
+      return { kind: "message", payload: `[error] ${msg}\n` };
+    }
+    // The final assistant turn already streamed via `assistant` events, so
+    // re-emitting `result.result` would duplicate it. Drop unless it carries
+    // content we haven't already shown (rare in -p mode).
+    return NULL;
+  }
+  return NULL;
+}
+
 export function parserAgyText(line: string): ParseResult {
   // Heuristic parser for agy's verbose plain-text headless output.
   const stripped = line.trim();
@@ -161,11 +229,53 @@ export function parserAgyText(line: string): ParseResult {
   return { kind: "message", payload: line };
 }
 
-export const PARSERS: Record<string, LineParser> = {
-  raw: parserRaw,
-  "codex-json": parserCodexJson,
-  "cursor-json": parserCursorJson,
-  "agy-text": parserAgyText,
+// Stateful claude-json parser: tracks whether any assistant text was emitted
+// during the stream. If no `assistant` event carried text by the time the
+// terminal `result` event arrives, surface `result.result` so a short-circuit
+// reply that lives only in the result block is not silently dropped. The
+// stateless `parserClaudeJson` (above) keeps its existing contract for tests
+// and any caller that does not want this fallback.
+export function createClaudeJsonParser(): LineParser {
+  let sawAssistantText = false;
+  return (line: string): ParseResult | ParseResult[] => {
+    const stripped = line.trim();
+    if (stripped) {
+      try {
+        const evt = JSON.parse(stripped);
+        if (evt?.type === "result" && !evt?.is_error && !sawAssistantText) {
+          const text = typeof evt?.result === "string" ? evt.result.trim() : "";
+          if (text) {
+            sawAssistantText = true;
+            return { kind: "message", payload: text + "\n" };
+          }
+        }
+      } catch {
+        // Not JSON: fall through to the stateless parser.
+      }
+    }
+    const out = parserClaudeJson(line);
+    const arr = Array.isArray(out) ? out : [out];
+    for (const r of arr) {
+      // Only mark assistant-text seen for genuine assistant chunks. Error
+      // messages from result events also use kind: "message" but flow through
+      // the is_error branch, which we never reach with a non-error result.
+      if (r.kind === "message" && r.payload && !r.payload.startsWith("[error]")) {
+        sawAssistantText = true;
+        break;
+      }
+    }
+    return out;
+  };
+}
+
+// Each entry is a factory so stateful parsers (claude-json) get a fresh
+// closure per dispatched run. Stateless parsers ignore the call.
+export const PARSERS: Record<string, () => LineParser> = {
+  raw: () => parserRaw,
+  "codex-json": () => parserCodexJson,
+  "cursor-json": () => parserCursorJson,
+  "claude-json": createClaudeJsonParser,
+  "agy-text": () => parserAgyText,
 };
 
 // Rust `tracing` lines: ISO8601 timestamp, level, then a `module::path:` prefix.

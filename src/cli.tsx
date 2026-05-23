@@ -1,10 +1,20 @@
 #!/usr/bin/env node
 import { render } from "ink";
+import { performance, PerformanceObserver } from "node:perf_hooks";
 import { createElement } from "react";
 import { App } from "./ui/App.js";
 import { ensureDirs, ensureDirsSync } from "./paths.js";
 import { loadConfig } from "./config.js";
 import { buildHelpText } from "./help.js";
+
+// React/Ink emit performance.mark/measure entries on every render. Over a long
+// TUI session that fills Node's 1M global perf-entry buffer and triggers
+// MaxPerformanceEntryBufferExceededWarning. Drain it as entries arrive.
+const perfObserver = new PerformanceObserver(() => {
+  performance.clearMarks();
+  performance.clearMeasures();
+});
+perfObserver.observe({ entryTypes: ["measure", "mark"], buffered: false });
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);

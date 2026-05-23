@@ -1,8 +1,17 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { configHome, expandHome, resolveConfigPath } from "../src/paths.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  configHome,
+  currentTask,
+  expandHome,
+  resolveConfigPath,
+  sessionsFile,
+  taskRoot,
+  transcriptDir,
+} from "../src/paths.js";
+import { clearActiveTaskForTest, setActiveTask } from "../src/tasks.js";
 
 const tempRoots: string[] = [];
 
@@ -67,5 +76,43 @@ describe("config path resolution", () => {
     resolveConfigPath({ cwd: project, env: { XDG_CONFIG_HOME: xdg } });
 
     expect(existsSync(path.join(xdg, "relevo"))).toBe(false);
+  });
+});
+
+describe("task-scoped paths use the active task", () => {
+  const originalCwd = process.cwd();
+  let project: string;
+
+  beforeEach(() => {
+    const temp = mkdtempSync(path.join(os.tmpdir(), "relevo-active-"));
+    process.chdir(temp);
+    project = process.cwd();
+    clearActiveTaskForTest();
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    rmSync(project, { recursive: true, force: true });
+    clearActiveTaskForTest();
+  });
+
+  it("currentTask throws when nothing is active", () => {
+    expect(() => currentTask()).toThrow(/no active task/);
+  });
+
+  it("currentTask returns the active task name once set", () => {
+    setActiveTask("s-20260522-132901");
+    expect(currentTask()).toBe("s-20260522-132901");
+    expect(taskRoot()).toBe(path.join(project, ".relay", "tasks", "s-20260522-132901"));
+    expect(transcriptDir()).toBe(
+      path.join(project, ".relay", "tasks", "s-20260522-132901", "transcripts"),
+    );
+    expect(sessionsFile()).toBe(
+      path.join(project, ".relay", "tasks", "s-20260522-132901", "sessions.json"),
+    );
+  });
+
+  it("taskRoot accepts an explicit name without activation", () => {
+    expect(taskRoot("other")).toBe(path.join(project, ".relay", "tasks", "other"));
   });
 });

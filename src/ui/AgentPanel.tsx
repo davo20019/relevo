@@ -6,10 +6,15 @@ import {
   hiddenLines,
   type AgentRunState,
 } from "../run.js";
+import { renderMarkdown } from "./markdown.js";
 
 // Quarter-segment rotation. Crisp at small sizes and distinct from the
 // ubiquitous braille spinner.
 const SPINNER_FRAMES = ["◜", "◝", "◞", "◟"];
+
+// 4-frame dot cycle for "waiting" / "running" labels. Padded so the line
+// width doesn't jitter as the dots grow.
+const DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
 
 type Status = "running" | "done" | "error" | "cancelled" | "interrupted";
 
@@ -37,14 +42,6 @@ const STATUS_LABEL: Record<Status, string> = {
   interrupted: "interrupted",
 };
 
-const BORDER_STYLE: Record<Status, "round" | "single" | "double" | "bold"> = {
-  running: "round",
-  done: "single",
-  error: "double",
-  cancelled: "single",
-  interrupted: "single",
-};
-
 const STATUS_COLOR: Record<Status, string> = {
   running: "cyan", // overridden by agent color below
   done: "green",
@@ -53,7 +50,14 @@ const STATUS_COLOR: Record<Status, string> = {
   interrupted: "yellow",
 };
 
-export function AgentPanel({ run }: { run: AgentRunState; tick?: number }) {
+export function AgentPanel({
+  run,
+  width,
+}: {
+  run: AgentRunState;
+  tick?: number;
+  width?: number;
+}) {
   const elapsed = elapsedSeconds(run);
   const status = statusOf(run);
   const isRunning = status === "running";
@@ -65,39 +69,68 @@ export function AgentPanel({ run }: { run: AgentRunState; tick?: number }) {
   const hidden = hiddenLines(run);
   const hasContent = text.trim().length > 0;
 
-  const borderColor = isRunning ? run.color : status === "error" ? "red" : "gray";
+  const borderColor = run.color;
   const glyphColor = isRunning ? run.color : STATUS_COLOR[status];
 
+  const statusLabel = STATUS_LABEL[status];
+  const elapsedStr = `${elapsed.toFixed(0)}s`;
+  // Header text laid into the top border line. Spaces around the title give
+  // it breathing room from the corner chars.
+  // Visible width: " " + glyph + " @" + name + "  " + status + "  " + elapsed + suffix + " "
+  const titleVisible =
+    1 + 1 + 2 + run.agentName.length + 2 + statusLabel.length + 2 + elapsedStr.length + suffix.length + 1;
+  // Top: ╭─{title}{filler}─╮ → overhead = 2 (╭─) + 2 (─╮) = 4
+  const overhead = 4;
+  const fillerCount = Math.max(0, (width ?? overhead + titleVisible) - overhead - titleVisible);
+
   return (
-    <Box
-      borderStyle={BORDER_STYLE[status]}
-      borderColor={borderColor}
-      flexDirection="column"
-      paddingX={1}
-    >
-      <Box>
+    <Box flexDirection="column" width={width}>
+      <Box flexDirection="row">
+        <Text color={borderColor}>╭─</Text>
+        <Text> </Text>
         <Text color={glyphColor} bold>
-          {glyph}{" "}
+          {glyph}
         </Text>
         <Text color={run.color} bold>
-          @{run.agentName}
+          {" @"}
+          {run.agentName}
         </Text>
         <Text dimColor>
           {"  "}
-          {STATUS_LABEL[status]}
+          {statusLabel}
           {"  "}
-          {elapsed.toFixed(0)}s{suffix}
+          {elapsedStr}
+          {suffix}
+          {" "}
+        </Text>
+        <Text color={borderColor}>
+          {"─".repeat(fillerCount)}
+          ─╮
         </Text>
       </Box>
-      {hidden > 0 && (
-        <Text dimColor italic>
-          ⋮ {hidden} earlier line{hidden === 1 ? "" : "s"} hidden
-        </Text>
-      )}
-      <Box marginTop={hasContent || hidden > 0 ? 0 : 0}>
-        <Text dimColor={!hasContent}>
-          {hasContent ? text : isRunning ? "waiting…" : "(no output)"}
-        </Text>
+      <Box
+        borderStyle="round"
+        borderColor={borderColor}
+        borderTop={false}
+        flexDirection="column"
+        paddingX={1}
+      >
+        {hidden > 0 && (
+          <Text dimColor italic>
+            ⋮ {hidden} earlier line{hidden === 1 ? "" : "s"} hidden
+          </Text>
+        )}
+        <Box>
+          {hasContent ? (
+            renderMarkdown(text, width !== undefined ? Math.max(1, width - 4) : undefined)
+          ) : (
+            <Text dimColor>
+              {isRunning
+                ? `waiting${DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!}`
+                : "(no output)"}
+            </Text>
+          )}
+        </Box>
       </Box>
     </Box>
   );

@@ -1,6 +1,14 @@
 import { Box, Text, useInput } from "ink";
-import { useMemo, useState } from "react";
-import { applySuggestion, filterSuggestions, tokenUnderCursor } from "./autocomplete.js";
+import { useEffect, useMemo, useState } from "react";
+import {
+  applySuggestion,
+  filterSuggestions,
+  SLASH_COMMAND_DESCRIPTIONS,
+  tokenUnderCursor,
+} from "./autocomplete.js";
+
+// 4-frame dot cycle matching AgentPanel's "waiting" animation cadence.
+const RUNNING_DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
 
 type Props = {
   value: string;
@@ -35,6 +43,16 @@ export function MultilineInput({
   const [cursor, setCursor] = useState(value.length);
   const [selected, setSelected] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
+  const [runningFrame, setRunningFrame] = useState(0);
+
+  useEffect(() => {
+    if (!disabled) return;
+    const id = setInterval(
+      () => setRunningFrame((f) => (f + 1) % RUNNING_DOT_FRAMES.length),
+      300,
+    );
+    return () => clearInterval(id);
+  }, [disabled]);
 
   const token = useMemo(() => tokenUnderCursor(value, cursor), [value, cursor]);
   const suggestions = useMemo(
@@ -65,8 +83,6 @@ export function MultilineInput({
 
   useInput(
     (rawInput, key) => {
-      if (disabled) return;
-
       if (acOpen) {
         if (key.upArrow) {
           setSelected((s) => (s - 1 + suggestions.length) % suggestions.length);
@@ -171,7 +187,6 @@ export function MultilineInput({
         return;
       }
     },
-    { isActive: !disabled },
   );
 
   return (
@@ -180,7 +195,9 @@ export function MultilineInput({
         <Text color="cyan" bold>
           ❯{" "}
         </Text>
-        <Box flexDirection="column">{renderBuffer(value, safeCursor, disabled)}</Box>
+        <Box flexDirection="column">
+          {renderBuffer(value, safeCursor, disabled, runningFrame)}
+        </Box>
       </Box>
       {acOpen && (
         <Box
@@ -190,24 +207,42 @@ export function MultilineInput({
           borderColor="gray"
           paddingX={1}
         >
-          {suggestions.map((s, i) => (
-            <Text
-              key={s}
-              color={i === safeSelected ? "black" : undefined}
-              backgroundColor={i === safeSelected ? "cyan" : undefined}
-            >
-              {s}
-            </Text>
-          ))}
+          {suggestions.map((s, i) => {
+            const isSelected = i === safeSelected;
+            const desc = SLASH_COMMAND_DESCRIPTIONS[s];
+            return (
+              <Text
+                key={s}
+                color={isSelected ? "black" : undefined}
+                backgroundColor={isSelected ? "cyan" : undefined}
+              >
+                {s}
+                {desc ? (
+                  <Text
+                    color={isSelected ? "black" : "gray"}
+                    backgroundColor={isSelected ? "cyan" : undefined}
+                  >
+                    {"  "}
+                    {desc}
+                  </Text>
+                ) : null}
+              </Text>
+            );
+          })}
         </Box>
       )}
     </Box>
   );
 }
 
-function renderBuffer(value: string, cursor: number, disabled: boolean) {
-  if (disabled) {
-    return <Text dimColor>{value || "(running...)"}</Text>;
+function renderBuffer(value: string, cursor: number, disabled: boolean, runningFrame: number) {
+  // While a dispatch is in flight and the buffer is empty, show a dim
+  // "(running...)" placeholder so the user knows agents are still working.
+  // Once they start typing, the placeholder yields to their text (which the
+  // queue hint above the input labels as "queued").
+  if (disabled && value.length === 0) {
+    const dots = RUNNING_DOT_FRAMES[runningFrame % RUNNING_DOT_FRAMES.length]!;
+    return <Text dimColor>{`(running${dots})`}</Text>;
   }
   const lines = value.length === 0 ? [""] : value.split("\n");
 

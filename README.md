@@ -89,14 +89,16 @@ First run creates `~/.config/relevo/agents.json` with six agents wired up:
 - Each agent runs in your current working directory, exactly as if you had typed
   the CLI command directly. They share files in that directory.
 - Per-project state lives in `./.relay/`. Add it to your project's `.gitignore`.
-- Work is organized by task. A repo can have many tasks, each isolated.
+- Work is organized by task. Each relevo invocation starts fresh by default; a
+  task is created lazily on your first prompt and auto-named from that prompt.
+  Use `/resume` to pick up a previous task in this project.
   - `.relay/tasks/<task>/transcripts/<agent>.md`: what each agent said in this task
   - `.relay/tasks/<task>/sessions.json`: native session IDs for resumable agents
-  - `.relay/current`: which task is active
-- `/task new <name>` starts a task. `/task switch <name>` changes tasks.
-  `/task list` shows them all. `/task end` returns to the `default` task.
-- For a clean review, start a fresh task first. Reusing `default` also reuses
-  its existing transcript context.
+- `/task list` shows tasks on disk. `/task rename <new>` renames the current
+  task. `/resume` shows the 12 most recent tasks; older tasks remain on disk
+  and can still be listed with `/task list`.
+- Two terminals open in the same project no longer share a session by default.
+  Use `/resume` in either terminal to opt into the other one's task.
 - Claude, Codex, Cursor, and agy have native session support by default. They
   keep their own conversation memory across turns; transcript replay is the
   fallback for other agents.
@@ -115,8 +117,8 @@ First run creates `~/.config/relevo/agents.json` with six agents wired up:
 | `/task` | show the current task |
 | `/task list` | list tasks |
 | `/task new <name>` | create and switch to a task |
-| `/task switch <name>` | switch to an existing task |
-| `/task end` | switch back to the default task |
+| `/task rename <new>` | rename the current task |
+| `/resume` | list recent tasks; `/resume <n>` switches to one |
 | `/open <agent>` | open a resumable native session in a new terminal window |
 | `/image <path>` | queue an image file for the next dispatch |
 | `/image paste` | queue the clipboard image, requires `pngpaste` |
@@ -143,11 +145,12 @@ generated defaults look like this:
 {
   "agents": {
     "claude": {
-      "cmd": "claude -p --dangerously-skip-permissions {prompt}",
-      "init_template": "claude -p --session-id {session_id} --dangerously-skip-permissions {prompt}",
-      "resume_template": "claude -p --resume {session_id} --dangerously-skip-permissions {prompt}",
+      "cmd": "claude -p --output-format stream-json --verbose --dangerously-skip-permissions {prompt}",
+      "init_template": "claude -p --output-format stream-json --verbose --session-id {session_id} --dangerously-skip-permissions {prompt}",
+      "resume_template": "claude -p --output-format stream-json --verbose --resume {session_id} --dangerously-skip-permissions {prompt}",
       "open_template": "claude --resume {session_id}",
-      "pre_generate_id": "uuid"
+      "pre_generate_id": "uuid",
+      "parser": "claude-json"
     },
     "codex": {
       "cmd": "codex exec -c sandbox_mode=workspace-write --skip-git-repo-check --json --color never {prompt}",

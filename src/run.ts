@@ -95,7 +95,11 @@ export async function prepareCommand(
   spec: AgentSpec,
   prompt: string,
 ): Promise<PreparedCommand> {
-  const parser = PARSERS[spec.parser ?? "raw"] ?? parserRaw;
+  // PARSERS holds factories so stateful parsers (claude-json) get a fresh
+  // closure per dispatched run. The session-invalid retry path also goes
+  // through prepareCommand, so each retry gets its own clean parser state.
+  const factory = PARSERS[spec.parser ?? "raw"];
+  const parser = factory ? factory() : parserRaw;
   const sessions = loadSessions();
   let sessionId: string | null = sessions[agentName] ?? null;
 
@@ -229,19 +233,22 @@ export async function streamToRun(opts: StreamOptions): Promise<StreamResult> {
     rawTail.push(withLf);
     if (rawTail.length > 40) rawTail.shift();
     if (!sessionInvalid && INVALID_SESSION_RE.test(line)) sessionInvalid = true;
-    const { kind, payload } = parser(withLf);
-    if (kind === "message" && payload) {
-      run.displayChunks.push(payload);
-      run.responseChunks.push(payload);
-    } else if (kind === "command") {
-      run.nCommands++;
-      if (verbose) run.displayChunks.push(`\`$ ${payload}\`\n\n`);
-    } else if (kind === "edit") {
-      run.nEdits++;
-      if (verbose) run.displayChunks.push(`\`+ edited ${payload}\`\n\n`);
-    } else if (kind === "session_id" && !captured && !preGen && payload) {
-      await saveSessionId(agentName, payload);
-      captured = payload;
+    const parsed = parser(withLf);
+    const results = Array.isArray(parsed) ? parsed : [parsed];
+    for (const { kind, payload } of results) {
+      if (kind === "message" && payload) {
+        run.displayChunks.push(payload);
+        run.responseChunks.push(payload);
+      } else if (kind === "command") {
+        run.nCommands++;
+        if (verbose) run.displayChunks.push(`\`$ ${payload}\`\n\n`);
+      } else if (kind === "edit") {
+        run.nEdits++;
+        if (verbose) run.displayChunks.push(`\`+ edited ${payload}\`\n\n`);
+      } else if (kind === "session_id" && !captured && !preGen && payload) {
+        await saveSessionId(agentName, payload);
+        captured = payload;
+      }
     }
   };
 

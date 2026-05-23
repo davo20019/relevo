@@ -9,3 +9,6 @@ dist/
 .cursor/
 .codex/
 .claude/
+
+# local planning and agent artifacts; not part of the published package
+docs/
