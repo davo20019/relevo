@@ -1,6 +1,8 @@
 // All audit logic in one module. Sections below are ordered:
 // types → pure helpers → scanner → renderers → runner → entry.
 
+import type { TokenUsage } from "./parsers.js";
+
 export type TurnResult = {
   fresh: number | null;   // null when the turn errored
   cached: number | null;
@@ -35,3 +37,10 @@ export type AuditResult = {
   skipped: Record<string, string>;
   hookScan: Record<string, ScannerOutput>;
 };
+
+export function tokenMetrics(t: TokenUsage): { fresh: number; cached: number; pct: number | null } {
+  const fresh = t.input + t.cacheCreate;
+  const cached = t.cacheRead;
+  const denom = fresh + cached;
+  return { fresh, cached, pct: denom > 0 ? cached / denom : null };
+}
