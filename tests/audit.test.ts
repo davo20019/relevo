@@ -14,9 +14,10 @@ import {
   SCANNERS,
   renderTextOutput,
   renderJsonOutput,
+  computeExitCode,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
-import type { AuditResult, Offender } from "../src/audit.js";
+import type { AuditResult, AgentResult, Offender } from "../src/audit.js";
 
 const tempDirs: string[] = [];
 function tmp(): string {
@@ -316,5 +317,49 @@ describe("renderJsonOutput", () => {
     expect(parsed.agents.claude.turns[0]).toEqual({
       fresh: null, cached: null, pct: null, error: "exit 1",
     });
+  });
+});
+
+const baseAgent: AgentResult = {
+  turns: [{ fresh: 100, cached: 900, pct: 0.9, error: null }],
+  verdict: "ok",
+  verdictPct: 0.9,
+  providerNote: null,
+};
+
+describe("computeExitCode", () => {
+  it("returns 0 for all-ok audit", () => {
+    const r: AuditResult = { prompt: "", turns: 1, agents: { a: baseAgent }, skipped: {}, hookScan: {} };
+    expect(computeExitCode(r)).toBe(0);
+  });
+  it("returns 2 when no agents were audited", () => {
+    const r: AuditResult = { prompt: "", turns: 1, agents: {}, skipped: { x: "y" }, hookScan: {} };
+    expect(computeExitCode(r)).toBe(2);
+  });
+  it("returns 1 on unqualified investigate", () => {
+    const r: AuditResult = {
+      prompt: "", turns: 1,
+      agents: { a: { ...baseAgent, verdict: "investigate", providerNote: null } },
+      skipped: {}, hookScan: {},
+    };
+    expect(computeExitCode(r)).toBe(1);
+  });
+  it("returns 0 when investigate is qualified", () => {
+    const r: AuditResult = {
+      prompt: "", turns: 1,
+      agents: { codex: { ...baseAgent, verdict: "investigate", providerNote: "provider-typical for codex" } },
+      skipped: {}, hookScan: {},
+    };
+    expect(computeExitCode(r)).toBe(0);
+  });
+  it("returns 1 on any errored turn", () => {
+    const r: AuditResult = {
+      prompt: "", turns: 1,
+      agents: {
+        a: { ...baseAgent, turns: [{ fresh: null, cached: null, pct: null, error: "exit 1" }] },
+      },
+      skipped: {}, hookScan: {},
+    };
+    expect(computeExitCode(r)).toBe(1);
   });
 });

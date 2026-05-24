@@ -261,3 +261,12 @@ export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): st
 export function renderJsonOutput(r: AuditResult): string {
   return JSON.stringify(r) + "\n";
 }
+
+export function computeExitCode(r: AuditResult): 0 | 1 | 2 {
+  if (Object.keys(r.agents).length === 0) return 2;
+  for (const agent of Object.values(r.agents)) {
+    if (agent.turns.some((t) => t.error !== null)) return 1;
+    if (agent.verdict === "investigate" && agent.providerNote === null) return 1;
+  }
+  return 0;
+}
