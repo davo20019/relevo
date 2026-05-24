@@ -263,6 +263,26 @@ describe("renderTextOutput", () => {
     };
     expect(renderTextOutput(r, { explain: true })).toMatch(/^\s*1\s+14,212\s+0\s+—/m);
   });
+  it("renders real pct on turn 1 when there's cross-session cache (cached > 0)", () => {
+    const r: AuditResult = {
+      ...SAMPLE,
+      agents: {
+        claude: {
+          turns: [
+            { fresh: 17435, cached: 17056, pct: 0.4945, error: null },  // turn 1 has cross-session cache
+            { fresh: 142, cached: 34000, pct: 0.996, error: null },
+          ],
+          verdict: "excellent",
+          verdictPct: 0.996,
+          providerNote: null,
+        },
+      },
+      hookScan: { claude: [] },
+    };
+    const out = renderTextOutput(r, { explain: true });
+    // Turn 1 should show 49% (rounded), NOT em-dash, because cached > 0
+    expect(out).toMatch(/^\s*1\s+17,435\s+17,056\s+49%/m);
+  });
   it("renders '(none detected)' for an empty claude offender list", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toContain("claude:  (none detected)");
   });

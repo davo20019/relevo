@@ -212,7 +212,7 @@ export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): st
       if (t.error) {
         lines.push(`  ${turnNo.padEnd(5)} ${"—".padEnd(8)} ${"—".padEnd(8)} err`);
       } else {
-        const pct = (i === 0 || t.pct === null) ? "—" : `${Math.round(t.pct * 100)}%`;
+        const pct = (t.pct === null || t.cached === 0) ? "—" : `${Math.round(t.pct * 100)}%`;
         lines.push(
           `  ${turnNo.padEnd(5)} ${fmtNum(t.fresh!).padEnd(8)} ${fmtNum(t.cached!).padEnd(8)} ${pct}`,
         );
