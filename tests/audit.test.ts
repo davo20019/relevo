@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import {
   renderJsonOutput,
   computeExitCode,
   parseAuditArgs,
+  deleteAuditTask,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { AuditResult, AgentResult, Offender } from "../src/audit.js";
@@ -418,5 +419,26 @@ describe("parseAuditArgs", () => {
   it("rejects --agent without a value", () => {
     const r = parseAuditArgs(["--agent"]);
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("deleteAuditTask", () => {
+  it("removes a directory inside the tasks root", () => {
+    const tasksRoot = tmp();
+    const target = path.join(tasksRoot, "audit-1");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "x.txt"), "hi");
+    deleteAuditTask(target, tasksRoot);
+    expect(existsSync(target)).toBe(false);
+  });
+  it("refuses to delete a path outside the tasks root", () => {
+    const tasksRoot = tmp();
+    const outside = tmp();
+    expect(() => deleteAuditTask(outside, tasksRoot)).toThrow(/refusing to delete/);
+    expect(existsSync(outside)).toBe(true);
+  });
+  it("is a no-op for a path that doesn't exist", () => {
+    const tasksRoot = tmp();
+    expect(() => deleteAuditTask(path.join(tasksRoot, "ghost"), tasksRoot)).not.toThrow();
   });
 });

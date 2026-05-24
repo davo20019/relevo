@@ -1,7 +1,7 @@
 // All audit logic in one module. Sections below are ordered:
 // types → pure helpers → scanner → renderers → runner → entry.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { TokenUsage } from "./parsers.js";
@@ -325,4 +325,13 @@ export function parseAuditArgs(argv: string[]): ParseResult {
     }
   }
   return { ok: true, opts };
+}
+
+export function deleteAuditTask(taskDir: string, tasksRoot: string): void {
+  const resolvedRoot = path.resolve(tasksRoot) + path.sep;
+  const resolvedTarget = path.resolve(taskDir);
+  if (!(resolvedTarget + path.sep).startsWith(resolvedRoot)) {
+    throw new Error(`refusing to delete '${taskDir}': not under tasks root '${tasksRoot}'`);
+  }
+  rmSync(resolvedTarget, { recursive: true, force: true });
 }
