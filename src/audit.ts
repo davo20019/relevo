@@ -19,21 +19,23 @@ export type TurnResult = {
   error: string | null;   // "exit 1", "timeout", etc. null on success
 };
 
-export type VerdictTier = "excellent" | "ok" | "investigate";
-
 export type AgentResult = {
   turns: TurnResult[];
-  verdict: VerdictTier;
-  verdictPct: number;
-  providerNote: string | null;
 };
 
+// A factual observation of a plugin whose SessionStart hook fires on `resume`.
+// Not a claim of causation — whether it actually invalidates the cache depends
+// on whether the hook's output is deterministic call-to-call. Verify with an
+// A/B (toggle the hook, rerun audit, compare).
+//
+// TODO: a stronger scanner could invoke each hook twice and diff stdout to
+// classify deterministic vs non-deterministic hooks. That converts pattern-
+// matched suspicion into measured fact. Deferred for safety (hooks may not be
+// safe to invoke standalone) and complexity.
 export type Offender = {
   name: string;
   file: string;
-  pattern: string;
-  effect: string;
-  patch: string;
+  matcher: string;
 };
 
 export type ScannerOutput = Offender[] | "no-scanner";
@@ -81,36 +83,10 @@ export function auditableAgentNames(
     .map(([name]) => name);
 }
 
-export function numericVerdict(pct: number): VerdictTier {
-  if (pct >= 0.95) return "excellent";
-  if (pct >= 0.80) return "ok";
-  return "investigate";
-}
-
-export function providerQualifier(
-  agentName: string,
-  pct: number,
-  scan: ScannerOutput,
-): string | null {
-  // "No offenders" = empty array OR the no-scanner sentinel. Both mean
-  // "no known config-level cause to flag", which is when the qualifier
-  // is meant to suppress the alarm for known-quirky providers.
-  const noOffenders = scan === "no-scanner" || scan.length === 0;
-  if (agentName === "codex" && pct <= 0.50 && noOffenders) {
-    return "provider-typical for codex";
-  }
-  return null;
-}
-
-export function displayVerdictText(
-  tier: VerdictTier,
-  pct: number,
-  providerNote: string | null,
-  turn: number,
-): string {
-  if (providerNote) return `ok (${providerNote} — see Notes)`;
-  return `${tier} (${Math.round(pct * 100)}% at turn ${turn})`;
-}
+// Audit emits raw measurements. Interpretation (is X% good? bad?) is left to
+// the user or to a downstream analyzing agent — different providers, prompts,
+// and setups have different ceilings, and baking thresholds into the tool
+// would be opinion, not measurement.
 
 export function scanClaudeHooks(claudeHome: string = path.join(os.homedir(), ".claude")): Offender[] {
   const root = path.join(claudeHome, "plugins", "cache");
@@ -132,9 +108,7 @@ export function scanClaudeHooks(claudeHome: string = path.join(os.homedir(), ".c
       out.push({
         name: pluginNameFromPath(root, file),
         file,
-        pattern: "SessionStart+resume",
-        effect: "injects content on every --resume, invalidating prefix cache",
-        patch: "remove 'resume' from the matcher or scope it to non-resume SessionStart events",
+        matcher,
       });
     }
   }
@@ -184,12 +158,32 @@ export function runScanner(agentName: string): ScannerOutput {
   return fn ? fn() : "no-scanner";
 }
 
-const CODEX_NOTE =
-  "codex caches less aggressively than claude/cursor at the API level. Cache rates in the\n" +
-  "  25–45% range are typical and not indicative of a config issue.";
-
 function fmtNum(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+// Trajectory of cache% across turns. Measurable signal: a flat trajectory at
+// any level means the cache isn't warming. Tokens: ↑ (grew >2pp), ↓ (fell
+// >2pp), → (within ±2pp), · (no comparable data — first turn or an errored
+// turn on either side). A successful turn with cached=0 is treated as 0% for
+// trajectory purposes (going from "no cache yet" to 99% is a real ↑).
+export function trajectory(turns: TurnResult[]): string {
+  const tokens: string[] = [];
+  for (let i = 0; i < turns.length; i++) {
+    if (i === 0) { tokens.push("·"); continue; }
+    const prev = turns[i - 1]!;
+    const cur = turns[i]!;
+    if (prev.error !== null || cur.error !== null) { tokens.push("·"); continue; }
+    const prevPct = prev.pct ?? 0;
+    const curPct = cur.pct ?? 0;
+    const delta = curPct - prevPct;
+    // Tolerance of ±2pp keeps small natural drift labeled flat. The 0.0201
+    // slack absorbs IEEE-754 noise (e.g., 0.51-0.49 = -0.0200000000000000018).
+    if (Math.abs(delta) <= 0.0201) tokens.push("→");
+    else if (delta > 0) tokens.push("↑");
+    else tokens.push("↓");
+  }
+  return tokens.join("");
 }
 
 export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): string {
@@ -218,25 +212,22 @@ export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): st
         );
       }
     });
-    // Any errored turn overrides the numeric verdict (spec failure-modes rule).
     const failed = agent.turns.filter((t) => t.error !== null).length;
     if (failed > 0) {
-      lines.push(`  verdict: error — ${failed}/${agent.turns.length} turns failed`);
+      lines.push(`  ${failed}/${agent.turns.length} turns errored`);
     } else {
-      const text = displayVerdictText(agent.verdict, agent.verdictPct, agent.providerNote, agent.turns.length);
-      lines.push(`  verdict: ${text}`);
+      const last = agent.turns[agent.turns.length - 1]!;
+      const lastPct = last.pct === null ? "—" : `${Math.round(last.pct * 100)}%`;
+      lines.push(
+        `  steady state @ turn ${agent.turns.length}: ${lastPct} cache, ${fmtNum(last.fresh!)} fresh tokens`,
+      );
+      lines.push(`  trajectory: ${trajectory(agent.turns)}`);
     }
     lines.push("");
   }
 
-  if (Object.keys(r.agents).some((n) => n === "codex")) {
-    lines.push("Notes:");
-    lines.push(`  ${CODEX_NOTE}`);
-    lines.push("");
-  }
-
   if (opts.explain) {
-    lines.push("Likely cache offenders:");
+    lines.push("SessionStart hooks that fire on --resume:");
     for (const name of Object.keys(r.agents)) {
       const scan = r.hookScan[name];
       if (scan === "no-scanner" || scan === undefined) {
@@ -244,18 +235,20 @@ export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): st
         continue;
       }
       if (scan.length === 0) {
-        lines.push(`  ${name}:  (none detected)`);
+        lines.push(`  ${name}:  (none found)`);
         continue;
       }
       lines.push(`  ${name}:`);
       for (const off of scan) {
         lines.push(`    • ${off.name}`);
         lines.push(`      file:    ${off.file}`);
-        lines.push(`      pattern: ${off.pattern}`);
-        lines.push(`      effect:  ${off.effect}`);
-        lines.push(`      patch:   ${off.patch}`);
+        lines.push(`      matcher: ${off.matcher}`);
       }
     }
+    lines.push("");
+    lines.push("  These hooks run on every --resume. They invalidate the cache prefix only if");
+    lines.push("  their output varies between calls (timestamps, version checks, dir state).");
+    lines.push("  To confirm impact, neutralize the hook (mv hooks.json aside) and rerun audit.");
   }
 
   return lines.join("\n") + "\n";
@@ -269,7 +262,6 @@ export function computeExitCode(r: AuditResult): 0 | 1 | 2 {
   if (Object.keys(r.agents).length === 0) return 2;
   for (const agent of Object.values(r.agents)) {
     if (agent.turns.some((t) => t.error !== null)) return 1;
-    if (agent.verdict === "investigate" && agent.providerNote === null) return 1;
   }
   return 0;
 }
@@ -357,9 +349,13 @@ Options:
   --help, -h         show this help
 
 Exit codes:
-  0  audited at least one agent, no unqualified 'investigate', no turn errors
-  1  any agent verdict 'investigate' (without provider qualifier), or any turn errored
+  0  audited at least one agent, no turn errors
+  1  any turn errored (the audit run itself failed for some agent)
   2  usage error, or no auditable agents were available
+
+Output is measurement only — per-turn fresh / cached / cache% plus steady-state
+and trajectory. Interpretation (is X% good?) is left to you; what counts as a
+healthy cache rate depends on provider, prompt, and setup.
 
 The audit runs each agent in a throwaway task (under .relay/tasks/) so existing
 sessions/transcripts aren't touched. Pass --keep to inspect the per-agent task
@@ -414,13 +410,7 @@ async function auditOneAgent(
   } finally {
     if (!opts.keep) deleteAuditTask(taskDir, tasksRoot);
   }
-  // Verdict is computed from turn N. If turn N errored or had null pct,
-  // verdictPct is 0 (which → numericVerdict "investigate"). The renderer
-  // overrides the verdict line entirely when any turn errored, so the
-  // numeric tier is only consulted on a clean run.
-  const lastTurn = turns[turns.length - 1];
-  const pct = lastTurn && lastTurn.pct !== null ? lastTurn.pct : 0;
-  return { turns, verdict: numericVerdict(pct), verdictPct: pct, providerNote: null };
+  return { turns };
 }
 
 // Resolve --agent <name> to an exit-2 error string, or null if it's auditable.
@@ -509,13 +499,6 @@ export async function runAudit(argv: string[]): Promise<number> {
     notifyStderr(opts.json, "Running offender scan (skip with --no-explain).");
   }
   for (const name of agentsToAudit) hookScan[name] = runScanner(name);
-
-  // Apply provider qualifiers now that scanner output is available.
-  for (const name of agentsToAudit) {
-    const agent = agents[name]!;
-    const scan = hookScan[name] ?? "no-scanner";
-    agent.providerNote = providerQualifier(name, agent.verdictPct, scan);
-  }
 
   const result: AuditResult = {
     prompt: opts.prompt,

@@ -6,9 +6,7 @@ import {
   auditabilityReason,
   auditableAgentNames,
   tokenMetrics,
-  numericVerdict,
-  providerQualifier,
-  displayVerdictText,
+  trajectory,
   scanClaudeHooks,
   runScanner,
   SCANNERS,
@@ -95,49 +93,47 @@ describe("auditableAgentNames", () => {
   });
 });
 
-describe("numericVerdict", () => {
-  it("≥0.95 → excellent", () => {
-    expect(numericVerdict(0.95)).toBe("excellent");
-    expect(numericVerdict(0.99)).toBe("excellent");
+describe("trajectory", () => {
+  it("first token is always · (no prior turn)", () => {
+    expect(trajectory([{ fresh: 1, cached: 1, pct: 0.5, error: null }])).toBe("·");
   });
-  it("0.80–0.9499 → ok", () => {
-    expect(numericVerdict(0.94)).toBe("ok");
-    expect(numericVerdict(0.80)).toBe("ok");
+  it("growing cache% emits ↑", () => {
+    const t = [
+      { fresh: 1, cached: 1, pct: 0.2, error: null },
+      { fresh: 1, cached: 1, pct: 0.5, error: null },
+      { fresh: 1, cached: 1, pct: 0.9, error: null },
+    ];
+    expect(trajectory(t)).toBe("·↑↑");
   });
-  it("<0.80 → investigate", () => {
-    expect(numericVerdict(0.79)).toBe("investigate");
-    expect(numericVerdict(0)).toBe("investigate");
+  it("flat cache% (within ±2pp) emits →", () => {
+    const t = [
+      { fresh: 1, cached: 1, pct: 0.50, error: null },
+      { fresh: 1, cached: 1, pct: 0.51, error: null },
+      { fresh: 1, cached: 1, pct: 0.49, error: null },
+    ];
+    expect(trajectory(t)).toBe("·→→");
   });
-});
-
-describe("providerQualifier", () => {
-  it("codex ≤50% with empty offender list → qualifier", () => {
-    expect(providerQualifier("codex", 0.33, [])).toBe("provider-typical for codex");
+  it("declining cache% emits ↓", () => {
+    const t = [
+      { fresh: 1, cached: 1, pct: 0.9, error: null },
+      { fresh: 1, cached: 1, pct: 0.5, error: null },
+    ];
+    expect(trajectory(t)).toBe("·↓");
   });
-  it("codex ≤50% with no-scanner sentinel → qualifier (v1 case)", () => {
-    expect(providerQualifier("codex", 0.33, "no-scanner")).toBe("provider-typical for codex");
+  it("treats a cached=0 turn as 0% for trajectory (going to 99% reads as ↑)", () => {
+    const t = [
+      { fresh: 1, cached: 0, pct: null, error: null },
+      { fresh: 1, cached: 99, pct: 0.99, error: null },
+    ];
+    expect(trajectory(t)).toBe("·↑");
   });
-  it("codex ≤50% with offenders found → no qualifier", () => {
-    const off: Offender = { name: "x", file: "y", pattern: "z", effect: "e", patch: "p" };
-    expect(providerQualifier("codex", 0.33, [off])).toBeNull();
-  });
-  it("codex >50% → no qualifier", () => {
-    expect(providerQualifier("codex", 0.51, "no-scanner")).toBeNull();
-  });
-  it("claude at 33% → no qualifier (not codex)", () => {
-    expect(providerQualifier("claude", 0.33, [])).toBeNull();
-  });
-});
-
-describe("displayVerdictText", () => {
-  it("renders raw tier with pct when no qualifier", () => {
-    expect(displayVerdictText("excellent", 0.99, null, 4)).toBe("excellent (99% at turn 4)");
-    expect(displayVerdictText("ok", 0.88, null, 4)).toBe("ok (88% at turn 4)");
-    expect(displayVerdictText("investigate", 0.44, null, 4)).toBe("investigate (44% at turn 4)");
-  });
-  it("softens to 'ok (<qualifier> — see Notes)' when qualifier present", () => {
-    expect(displayVerdictText("investigate", 0.33, "provider-typical for codex", 4))
-      .toBe("ok (provider-typical for codex — see Notes)");
+  it("errored turn on either side emits · (no comparable data)", () => {
+    const t = [
+      { fresh: 1, cached: 1, pct: 0.5, error: null },
+      { fresh: null, cached: null, pct: null, error: "exit 1" },
+      { fresh: 1, cached: 1, pct: 0.5, error: null },
+    ];
+    expect(trajectory(t)).toBe("···");
   });
 });
 
@@ -147,7 +143,7 @@ describe("scanClaudeHooks", () => {
     expect(scanClaudeHooks(home)).toEqual([]);
   });
 
-  it("detects SessionStart matcher containing 'resume' as a |-token", () => {
+  it("detects SessionStart matcher containing 'resume' as a |-token, capturing the verbatim matcher", () => {
     const home = tmp();
     writeHooks(home, "vercel", "0.43.0", {
       hooks: { SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [] }] },
@@ -155,7 +151,7 @@ describe("scanClaudeHooks", () => {
     const found = scanClaudeHooks(home);
     expect(found).toHaveLength(1);
     expect(found[0]!.name).toBe("vercel@0.43.0");
-    expect(found[0]!.pattern).toBe("SessionStart+resume");
+    expect(found[0]!.matcher).toBe("startup|resume|clear|compact");
   });
 
   it("does NOT flag matchers where 'resume' is only a substring", () => {
@@ -205,9 +201,6 @@ const SAMPLE: AuditResult = {
         { fresh: 142, cached: 14053, pct: 0.99, error: null },
         { fresh: 142, cached: 14089, pct: 0.99, error: null },
       ],
-      verdict: "excellent",
-      verdictPct: 0.99,
-      providerNote: null,
     },
     codex: {
       turns: [
@@ -216,9 +209,6 @@ const SAMPLE: AuditResult = {
         { fresh: 8140, cached: 4096, pct: 0.33, error: null },
         { fresh: 8140, cached: 4096, pct: 0.33, error: null },
       ],
-      verdict: "investigate",
-      verdictPct: 0.33,
-      providerNote: "provider-typical for codex",
     },
   },
   skipped: { opencode: "no structured parser" },
@@ -231,16 +221,21 @@ describe("renderTextOutput", () => {
     expect(out).toContain("claude");
     expect(out).toContain("codex");
   });
-  it("softens codex verdict via qualifier and includes Notes section", () => {
+  it("emits a steady-state summary line per agent", () => {
     const out = renderTextOutput(SAMPLE, { explain: true });
-    expect(out).toContain("verdict: ok (provider-typical for codex — see Notes)");
-    expect(out).toContain("Notes:");
-    expect(out).toMatch(/codex caches less aggressively/);
+    expect(out).toContain("steady state @ turn 4: 99% cache, 142 fresh tokens");
+    expect(out).toContain("steady state @ turn 4: 33% cache, 8,140 fresh tokens");
   });
-  it("omits Notes section when codex is not audited", () => {
-    const { codex, ...rest } = SAMPLE.agents;
-    const noCodex: AuditResult = { ...SAMPLE, agents: rest, hookScan: { claude: [] } };
-    expect(renderTextOutput(noCodex, { explain: true })).not.toContain("Notes:");
+  it("emits a trajectory line per agent", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    // claude: pct null → 0.99 → 0.99 → 0.99 = ·↑→→
+    expect(out).toContain("trajectory: ·↑→→");
+  });
+  it("does not include any 'verdict' or 'Notes' framing", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    expect(out).not.toContain("verdict:");
+    expect(out).not.toContain("Notes:");
+    expect(out).not.toContain("provider-typical");
   });
   it("renders em-dash for turn-1 pct (no cache to read)", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/^\s*1\s+14,212\s+0\s+—/m);
@@ -251,12 +246,9 @@ describe("renderTextOutput", () => {
       agents: {
         claude: {
           turns: [
-            { fresh: 14212, cached: 0, pct: 0, error: null },  // pct: 0 (live shape)
+            { fresh: 14212, cached: 0, pct: 0, error: null },
             { fresh: 142, cached: 13981, pct: 0.99, error: null },
           ],
-          verdict: "excellent",
-          verdictPct: 0.99,
-          providerNote: null,
         },
       },
       hookScan: { claude: [] },
@@ -269,36 +261,44 @@ describe("renderTextOutput", () => {
       agents: {
         claude: {
           turns: [
-            { fresh: 17435, cached: 17056, pct: 0.4945, error: null },  // turn 1 has cross-session cache
+            { fresh: 17435, cached: 17056, pct: 0.4945, error: null },
             { fresh: 142, cached: 34000, pct: 0.996, error: null },
           ],
-          verdict: "excellent",
-          verdictPct: 0.996,
-          providerNote: null,
         },
       },
       hookScan: { claude: [] },
     };
     const out = renderTextOutput(r, { explain: true });
-    // Turn 1 should show 49% (rounded), NOT em-dash, because cached > 0
     expect(out).toMatch(/^\s*1\s+17,435\s+17,056\s+49%/m);
   });
-  it("renders '(none detected)' for an empty claude offender list", () => {
-    expect(renderTextOutput(SAMPLE, { explain: true })).toContain("claude:  (none detected)");
+  it("renders '(none found)' for an empty claude offender list", () => {
+    expect(renderTextOutput(SAMPLE, { explain: true })).toContain("claude:  (none found)");
   });
   it("renders 'scanner not yet implemented' for no-scanner sentinel", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/codex:\s+scanner not yet implemented/);
+  });
+  it("uses neutral framing — no causal claims like 'offender', 'effect', or 'patch'", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    expect(out).toContain("SessionStart hooks that fire on --resume:");
+    expect(out).not.toMatch(/^Likely cache offenders/m);
+    expect(out).not.toMatch(/effect:/);
+    expect(out).not.toMatch(/patch:/);
+  });
+  it("includes the verify-by-A/B disclaimer", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    expect(out).toContain("invalidate the cache prefix only if");
+    expect(out).toContain("rerun audit");
   });
   it("includes skipped agents in a leading skipped: line", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/skipped:\s+opencode \(no structured parser\)/);
   });
   it("omits the entire offender section when explain is false", () => {
     const out = renderTextOutput(SAMPLE, { explain: false });
-    expect(out).not.toContain("Likely cache offenders");
+    expect(out).not.toContain("SessionStart hooks that fire");
     expect(out).not.toContain("scanner not yet implemented");
-    expect(out).not.toContain("(none detected)");
+    expect(out).not.toContain("(none found)");
   });
-  it("renders 'verdict: error — N/M turns failed' when any turn errored", () => {
+  it("renders 'N/M turns errored' when any turn errored, replacing the summary lines", () => {
     const errored: AuditResult = {
       ...SAMPLE,
       agents: {
@@ -309,26 +309,18 @@ describe("renderTextOutput", () => {
             { fresh: 100, cached: 900, pct: 0.9, error: null },
             { fresh: null, cached: null, pct: null, error: "exit 1" },
           ],
-          verdict: "investigate",
-          verdictPct: 0,
-          providerNote: null,
         },
       },
       hookScan: { claude: [] },
     };
     const out = renderTextOutput(errored, { explain: true });
-    expect(out).toContain("verdict: error — 2/4 turns failed");
-    expect(out).not.toContain("verdict: investigate");
+    expect(out).toContain("2/4 turns errored");
+    expect(out).not.toContain("steady state");
+    expect(out).not.toContain("trajectory:");
   });
 });
 
 describe("renderJsonOutput", () => {
-  it("emits raw verdict tier even when text would soften it", () => {
-    const parsed = JSON.parse(renderJsonOutput(SAMPLE));
-    expect(parsed.agents.codex.verdict).toBe("investigate");
-    expect(parsed.agents.codex.verdictPct).toBeCloseTo(0.33);
-    expect(parsed.agents.codex.providerNote).toBe("provider-typical for codex");
-  });
   it("includes the skipped object", () => {
     const parsed = JSON.parse(renderJsonOutput(SAMPLE));
     expect(parsed.skipped).toEqual({ opencode: "no structured parser" });
@@ -348,9 +340,6 @@ describe("renderJsonOutput", () => {
       agents: {
         claude: {
           turns: [{ fresh: null, cached: null, pct: null, error: "exit 1" }],
-          verdict: "investigate",
-          verdictPct: 0,
-          providerNote: null,
         },
       },
     };
@@ -359,13 +348,16 @@ describe("renderJsonOutput", () => {
       fresh: null, cached: null, pct: null, error: "exit 1",
     });
   });
+  it("does not include verdict / verdictPct / providerNote fields", () => {
+    const parsed = JSON.parse(renderJsonOutput(SAMPLE));
+    expect(parsed.agents.claude.verdict).toBeUndefined();
+    expect(parsed.agents.claude.verdictPct).toBeUndefined();
+    expect(parsed.agents.claude.providerNote).toBeUndefined();
+  });
 });
 
 const baseAgent: AgentResult = {
   turns: [{ fresh: 100, cached: 900, pct: 0.9, error: null }],
-  verdict: "ok",
-  verdictPct: 0.9,
-  providerNote: null,
 };
 
 describe("computeExitCode", () => {
@@ -377,18 +369,10 @@ describe("computeExitCode", () => {
     const r: AuditResult = { prompt: "", turns: 1, agents: {}, skipped: { x: "y" }, hookScan: {} };
     expect(computeExitCode(r)).toBe(2);
   });
-  it("returns 1 on unqualified investigate", () => {
+  it("returns 0 even for very low cache% (no judgment)", () => {
     const r: AuditResult = {
       prompt: "", turns: 1,
-      agents: { a: { ...baseAgent, verdict: "investigate", providerNote: null } },
-      skipped: {}, hookScan: {},
-    };
-    expect(computeExitCode(r)).toBe(1);
-  });
-  it("returns 0 when investigate is qualified", () => {
-    const r: AuditResult = {
-      prompt: "", turns: 1,
-      agents: { codex: { ...baseAgent, verdict: "investigate", providerNote: "provider-typical for codex" } },
+      agents: { codex: { turns: [{ fresh: 1000, cached: 10, pct: 0.01, error: null }] } },
       skipped: {}, hookScan: {},
     };
     expect(computeExitCode(r)).toBe(0);

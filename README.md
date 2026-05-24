@@ -2,8 +2,10 @@
 
 A multi-agent coding workspace that sits in front of local coding-agent CLIs so
 you can drive Claude Code, Codex, OpenCode, Cursor CLI, Antigravity (`agy`), and
-similar tools from one terminal. Each agent's transcript is fed back to the
-others as context, and you can fan a prompt out to several agents in parallel.
+similar tools from one terminal. Route prompts with `@mentions` to one or
+several agents in parallel; when you mention multiple agents in the same
+dispatch, each one receives a short snippet of the others' recent activity as
+hand-off context.
 
 ## Why
 
@@ -197,6 +199,93 @@ You can also drag and drop an image file into your prompt. Existing image paths
 are extracted, attached to the next dispatch, and removed from the prompt text.
 Dropped or pasted images that need a stable path are copied to Relevo's OS
 cache directory and cleaned up on startup after 30 days.
+
+## `relevo audit` — cache-hit diagnostic
+
+Each agent CLI implements its own prompt caching, but there's usually no way to
+verify it's working in your environment without writing a benchmark script.
+`relevo audit` runs the same trivial prompt N times against each auditable
+agent and reports the per-turn fresh/cached/cache% breakdown, a steady-state
+summary, and a trajectory glyph showing how cache% moves across turns. With
+`--explain` (default on) it also scans Claude plugin configs for `SessionStart`
+hooks whose matcher includes `resume` — a structural pattern that can
+invalidate the prefix cache if the hook's output varies between calls.
+
+Output is measurement only — no verdicts, no thresholds. Whether a given cache
+rate is "good" depends on provider, prompt, and setup, so interpretation is
+left to you (or to a downstream tool reading `--json`).
+
+```bash
+relevo audit                # all auditable agents, 4 turns each
+relevo audit --agent claude # one agent
+relevo audit --turns 6      # more turns per agent
+relevo audit --json         # JSON for scripting
+relevo audit --no-explain   # skip the hook scan
+relevo audit --help         # full flag reference + exit codes
+```
+
+Auditable means: enabled, on `PATH`, structured parser (`claude-json`,
+`codex-json`, or `cursor-json`), and a `resume_template` defined. Other agents
+in `agents.json` (e.g. `opencode`, `pi`, `agy`) appear in a `skipped:` line.
+The audit runs in a throwaway task under `.relay/tasks/audit-…/` that's
+deleted on exit (pass `--keep` to inspect).
+
+Sample output (excerpted):
+
+```
+relevo audit — 4 turns, prompt: "Reply with exactly the word OK. No other text."
+
+claude
+  turn  fresh    cached   cache%
+  1     14,212   0        —
+  2     142      13,981   99%
+  3     142      14,053   99%
+  4     142      14,089   99%
+  steady state @ turn 4: 99% cache, 142 fresh tokens
+  trajectory: ·↑→→
+
+codex
+  turn  fresh    cached   cache%
+  1     12,287   0        —
+  2     8,140    4,096    33%
+  3     8,140    4,096    33%
+  4     8,140    4,096    33%
+  steady state @ turn 4: 33% cache, 8,140 fresh tokens
+  trajectory: ·↑→→
+
+cursor
+  turn  fresh    cached   cache%
+  1     41,699   0        —
+  2     53       41,646   100%
+  3     50       41,696   100%
+  4     39       41,746   100%
+  steady state @ turn 4: 100% cache, 39 fresh tokens
+  trajectory: ·↑→→
+
+SessionStart hooks that fire on --resume:
+  claude:
+    • vercel@0.43.0
+      file:    ~/.claude/plugins/cache/.../vercel/0.43.0/hooks/hooks.json
+      matcher: startup|resume|clear|compact
+  codex:   scanner not yet implemented
+  cursor:  scanner not yet implemented
+
+  These hooks run on every --resume. They invalidate the cache prefix only if
+  their output varies between calls (timestamps, version checks, dir state).
+  To confirm impact, neutralize the hook (mv hooks.json aside) and rerun audit.
+```
+
+Reading the output: turn 1 always shows `—` for cache% (no prior session to
+hit). The interesting numbers are turn 2 onward — that's where the cache
+either warms up or doesn't. A `→→→` trajectory at high cache% means a healthy
+warmed prefix; a `→→→` trajectory at low cache% with non-trivial steady-state
+`fresh tokens` is the signal that something is being re-injected on every turn.
+
+Each turn billed to your CLI accounts. The default is 12 model turns
+(3 agents × 4) and Relevo prints a one-line cost warning to stderr before
+spawning. Exit codes: `0` audited at least one agent with no turn errors;
+`1` any turn errored (the audit run itself failed for some agent); `2` usage
+error or no auditable agents available.
 
 ## Configuration
 
