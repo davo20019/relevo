@@ -6,8 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import type { TokenUsage } from "./parsers.js";
 import type { AgentSpec } from "./config.js";
-import { agentCommandName, agentIsEnabled } from "./config.js";
+import { agentCommandName, agentIsEnabled, loadConfig } from "./config.js";
 import which from "./which.js";
+import { newRun, prepareCommand, spawnProc, streamToRun } from "./run.js";
+import { ensureDirsSync, ensureTask, stateDir } from "./paths.js";
+import { setActiveTask } from "./tasks.js";
 
 export type TurnResult = {
   fresh: number | null;   // null when the turn errored
@@ -362,5 +365,165 @@ The audit runs each agent in a throwaway task (under .relay/tasks/) so existing
 sessions/transcripts aren't touched. Pass --keep to inspect the per-agent task
 dirs afterward.
 `;
+}
+
+const COST_ESTIMATE_SECONDS_PER_TURN = 30;
+
+function notifyStderr(json: boolean, msg: string): void {
+  if (json) return;
+  process.stderr.write(msg + "\n");
+}
+
+async function auditOneAgent(
+  agentName: string,
+  spec: AgentSpec,
+  opts: AuditOpts,
+  tasksRoot: string,
+): Promise<AgentResult> {
+  const taskName = `audit-${Date.now()}-${agentName}`;
+  await ensureTask(taskName);
+  setActiveTask(taskName);
+  const taskDir = path.join(tasksRoot, taskName);
+  const turns: TurnResult[] = [];
+  try {
+    for (let i = 0; i < opts.turns; i++) {
+      notifyStderr(opts.json, `${agentName}: turn ${i + 1}/${opts.turns} done`);
+      const prep = await prepareCommand(agentName, spec, opts.prompt);
+      const spawn = spawnProc(prep.args, prep.viaStdin, opts.prompt);
+      if (spawn.error || !spawn.proc) {
+        turns.push({ fresh: null, cached: null, pct: null, error: spawn.error ?? "spawn failed" });
+        continue;
+      }
+      const run = newRun(agentName, "#000000", opts.prompt);
+      const result = await streamToRun({
+        run, proc: spawn.proc, parser: prep.parser, agentName,
+        preGen: prep.preGen, sessionId: prep.sessionId, verbose: false,
+      });
+      if (result.exitCode !== 0 || !run.tokens) {
+        turns.push({
+          fresh: null, cached: null, pct: null,
+          error: result.exitCode !== 0 ? `exit ${result.exitCode}` : "no usage event",
+        });
+        continue;
+      }
+      const m = tokenMetrics(run.tokens);
+      turns.push({ fresh: m.fresh, cached: m.cached, pct: m.pct, error: null });
+    }
+  } finally {
+    if (!opts.keep) deleteAuditTask(taskDir, tasksRoot);
+  }
+  // Verdict is computed from turn N. If turn N errored or had null pct,
+  // verdictPct is 0 (which → numericVerdict "investigate"). The renderer
+  // overrides the verdict line entirely when any turn errored, so the
+  // numeric tier is only consulted on a clean run.
+  const lastTurn = turns[turns.length - 1];
+  const pct = lastTurn && lastTurn.pct !== null ? lastTurn.pct : 0;
+  return { turns, verdict: numericVerdict(pct), verdictPct: pct, providerNote: null };
+}
+
+// Resolve --agent <name> to an exit-2 error string, or null if it's auditable.
+// Spec-shaped messages: one per failure mode.
+function validateAgentForAudit(
+  name: string,
+  configured: Record<string, AgentSpec>,
+): { ok: true; spec: AgentSpec } | { ok: false; error: string } {
+  const spec = configured[name];
+  if (!spec) {
+    return { ok: false, error: `error: unknown agent '${name}'. configured: ${Object.keys(configured).join(", ")}` };
+  }
+  if (!agentIsEnabled(spec)) {
+    return { ok: false, error: `error: agent '${name}' is disabled in agents.json` };
+  }
+  const cmd = agentCommandName(spec);
+  if (cmd && !which(cmd)) {
+    return { ok: false, error: `error: agent '${name}' is not installed (binary '${cmd}' not on PATH)` };
+  }
+  const reason = auditabilityReason(name, spec);
+  if (reason !== null) {
+    return { ok: false, error: `error: agent '${name}' is not auditable (${reason})` };
+  }
+  return { ok: true, spec };
+}
+
+export async function runAudit(argv: string[]): Promise<number> {
+  const parsed = parseAuditArgs(argv);
+  if (!parsed.ok) {
+    process.stderr.write(parsed.error + "\n");
+    return 2;
+  }
+  const opts = parsed.opts;
+  if (opts.helpRequested) {
+    process.stdout.write(auditHelpText());
+    return 0;
+  }
+
+  ensureDirsSync();
+  const config = loadConfig();
+  const tasksRoot = path.join(stateDir(), "tasks");
+
+  // Decide which agents to audit and which to record as skipped.
+  const agentsToAudit: string[] = [];
+  const skipped: Record<string, string> = {};
+  if (opts.agent) {
+    const check = validateAgentForAudit(opts.agent, config.agents);
+    if (!check.ok) {
+      process.stderr.write(check.error + "\n");
+      return 2;
+    }
+    agentsToAudit.push(opts.agent);
+  } else {
+    for (const [name, spec] of Object.entries(config.agents)) {
+      const reason = auditabilityReason(name, spec);
+      if (reason === null) agentsToAudit.push(name);
+      else skipped[name] = reason;
+    }
+  }
+
+  // Early exit: zero agents to audit → exit 2 before cost warning or any output.
+  if (agentsToAudit.length === 0) {
+    process.stderr.write("error: no auditable agents available\n");
+    return 2;
+  }
+
+  // Cost warning to stderr (suppressed under --json).
+  const totalTurns = agentsToAudit.length * opts.turns;
+  const estMin = Math.max(1, Math.round((totalTurns * COST_ESTIMATE_SECONDS_PER_TURN) / 60));
+  notifyStderr(
+    opts.json,
+    `relevo audit will run ${agentsToAudit.length} agents × ${opts.turns} turns = ${totalTurns} model turns (~${estMin} min, billed to your CLI accounts).`,
+  );
+
+  // Run each agent's audit (sequential — keeps output legible and avoids competing for IO).
+  const agents: Record<string, AgentResult> = {};
+  for (const name of agentsToAudit) {
+    agents[name] = await auditOneAgent(name, config.agents[name]!, opts, tasksRoot);
+  }
+
+  // Per-CLI offender scan (stderr note suppressed under --json).
+  const hookScan: Record<string, ScannerOutput> = {};
+  if (opts.explain) {
+    notifyStderr(opts.json, "Running offender scan (skip with --no-explain).");
+    for (const name of agentsToAudit) hookScan[name] = runScanner(name);
+  }
+
+  // Apply provider qualifiers now that scanner output is available.
+  for (const name of agentsToAudit) {
+    const agent = agents[name]!;
+    const scan = hookScan[name] ?? "no-scanner";
+    agent.providerNote = providerQualifier(name, agent.verdictPct, scan);
+  }
+
+  const result: AuditResult = {
+    prompt: opts.prompt,
+    turns: opts.turns,
+    agents,
+    skipped,
+    hookScan,
+  };
+
+  process.stdout.write(
+    opts.json ? renderJsonOutput(result) : renderTextOutput(result, { explain: opts.explain }),
+  );
+  return computeExitCode(result);
 }
 
