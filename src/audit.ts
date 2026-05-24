@@ -387,10 +387,10 @@ async function auditOneAgent(
   const turns: TurnResult[] = [];
   try {
     for (let i = 0; i < opts.turns; i++) {
-      notifyStderr(opts.json, `${agentName}: turn ${i + 1}/${opts.turns} done`);
       const prep = await prepareCommand(agentName, spec, opts.prompt);
       const spawn = spawnProc(prep.args, prep.viaStdin, opts.prompt);
       if (spawn.error || !spawn.proc) {
+        notifyStderr(opts.json, `${agentName}: turn ${i + 1}/${opts.turns} done`);
         turns.push({ fresh: null, cached: null, pct: null, error: spawn.error ?? "spawn failed" });
         continue;
       }
@@ -400,6 +400,7 @@ async function auditOneAgent(
         preGen: prep.preGen, sessionId: prep.sessionId, verbose: false,
       });
       if (result.exitCode !== 0 || !run.tokens) {
+        notifyStderr(opts.json, `${agentName}: turn ${i + 1}/${opts.turns} done`);
         turns.push({
           fresh: null, cached: null, pct: null,
           error: result.exitCode !== 0 ? `exit ${result.exitCode}` : "no usage event",
@@ -407,6 +408,7 @@ async function auditOneAgent(
         continue;
       }
       const m = tokenMetrics(run.tokens);
+      notifyStderr(opts.json, `${agentName}: turn ${i + 1}/${opts.turns} done`);
       turns.push({ fresh: m.fresh, cached: m.cached, pct: m.pct, error: null });
     }
   } finally {
@@ -499,12 +501,14 @@ export async function runAudit(argv: string[]): Promise<number> {
     agents[name] = await auditOneAgent(name, config.agents[name]!, opts, tasksRoot);
   }
 
-  // Per-CLI offender scan (stderr note suppressed under --json).
+  // Always populate hookScan so the JSON shape invariant holds
+  // (hookScan keys match agents keys). The text renderer hides
+  // the offender section when --no-explain is passed.
   const hookScan: Record<string, ScannerOutput> = {};
   if (opts.explain) {
     notifyStderr(opts.json, "Running offender scan (skip with --no-explain).");
-    for (const name of agentsToAudit) hookScan[name] = runScanner(name);
   }
+  for (const name of agentsToAudit) hookScan[name] = runScanner(name);
 
   // Apply provider qualifiers now that scanner output is available.
   for (const name of agentsToAudit) {
