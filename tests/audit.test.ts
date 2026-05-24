@@ -245,6 +245,24 @@ describe("renderTextOutput", () => {
   it("renders em-dash for turn-1 pct (no cache to read)", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/^\s*1\s+14,212\s+0\s+—/m);
   });
+  it("renders em-dash for turn 1 even when pct is 0 (no cache available yet)", () => {
+    const r: AuditResult = {
+      ...SAMPLE,
+      agents: {
+        claude: {
+          turns: [
+            { fresh: 14212, cached: 0, pct: 0, error: null },  // pct: 0 (live shape)
+            { fresh: 142, cached: 13981, pct: 0.99, error: null },
+          ],
+          verdict: "excellent",
+          verdictPct: 0.99,
+          providerNote: null,
+        },
+      },
+      hookScan: { claude: [] },
+    };
+    expect(renderTextOutput(r, { explain: true })).toMatch(/^\s*1\s+14,212\s+0\s+—/m);
+  });
   it("renders '(none detected)' for an empty claude offender list", () => {
     expect(renderTextOutput(SAMPLE, { explain: true })).toContain("claude:  (none detected)");
   });
