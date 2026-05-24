@@ -335,3 +335,32 @@ export function deleteAuditTask(taskDir: string, tasksRoot: string): void {
   }
   rmSync(resolvedTarget, { recursive: true, force: true });
 }
+
+export function auditHelpText(): string {
+  return `relevo audit — measure cache hit ratios across agent CLIs
+
+Usage:
+  relevo audit [options]
+
+Options:
+  --agent <name>     audit only one agent (default: all auditable+available)
+  --turns <n>        number of identical turns (default: 4, minimum: 2)
+  --prompt <text>    override the default audit prompt
+                       (default: "Reply with exactly the word OK. No other text.")
+  --explain          run per-CLI offender scanners (default: on)
+  --no-explain       skip the offender scan
+  --keep             keep the throwaway audit task dir after the run
+  --json             emit results as JSON instead of the text table
+  --help, -h         show this help
+
+Exit codes:
+  0  audited at least one agent, no unqualified 'investigate', no turn errors
+  1  any agent verdict 'investigate' (without provider qualifier), or any turn errored
+  2  usage error, or no auditable agents were available
+
+The audit runs each agent in a throwaway task (under .relay/tasks/) so existing
+sessions/transcripts aren't touched. Pass --keep to inspect the per-agent task
+dirs afterward.
+`;
+}
+

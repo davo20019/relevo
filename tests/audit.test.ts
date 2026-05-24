@@ -17,6 +17,7 @@ import {
   computeExitCode,
   parseAuditArgs,
   deleteAuditTask,
+  auditHelpText,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { AuditResult, AgentResult, Offender } from "../src/audit.js";
@@ -440,5 +441,19 @@ describe("deleteAuditTask", () => {
   it("is a no-op for a path that doesn't exist", () => {
     const tasksRoot = tmp();
     expect(() => deleteAuditTask(path.join(tasksRoot, "ghost"), tasksRoot)).not.toThrow();
+  });
+});
+
+describe("auditHelpText", () => {
+  it("documents all flags", () => {
+    const h = auditHelpText();
+    for (const flag of ["--agent", "--turns", "--prompt", "--explain", "--no-explain", "--keep", "--json", "--help"]) {
+      expect(h).toContain(flag);
+    }
+  });
+  it("notes the default turn count and prompt", () => {
+    const h = auditHelpText();
+    expect(h).toMatch(/default: 4/);
+    expect(h).toMatch(/Reply with exactly the word OK/);
   });
 });
