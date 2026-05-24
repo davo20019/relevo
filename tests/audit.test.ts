@@ -13,6 +13,7 @@ import {
   runScanner,
   SCANNERS,
   renderTextOutput,
+  renderJsonOutput,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { AuditResult, Offender } from "../src/audit.js";
@@ -276,5 +277,44 @@ describe("renderTextOutput", () => {
     const out = renderTextOutput(errored, { explain: true });
     expect(out).toContain("verdict: error — 2/4 turns failed");
     expect(out).not.toContain("verdict: investigate");
+  });
+});
+
+describe("renderJsonOutput", () => {
+  it("emits raw verdict tier even when text would soften it", () => {
+    const parsed = JSON.parse(renderJsonOutput(SAMPLE));
+    expect(parsed.agents.codex.verdict).toBe("investigate");
+    expect(parsed.agents.codex.verdictPct).toBeCloseTo(0.33);
+    expect(parsed.agents.codex.providerNote).toBe("provider-typical for codex");
+  });
+  it("includes the skipped object", () => {
+    const parsed = JSON.parse(renderJsonOutput(SAMPLE));
+    expect(parsed.skipped).toEqual({ opencode: "no structured parser" });
+  });
+  it("hookScan keys match agents keys", () => {
+    const parsed = JSON.parse(renderJsonOutput(SAMPLE));
+    expect(Object.keys(parsed.hookScan).sort()).toEqual(Object.keys(parsed.agents).sort());
+  });
+  it("ends with exactly one trailing newline", () => {
+    const out = renderJsonOutput(SAMPLE);
+    expect(out.endsWith("\n")).toBe(true);
+    expect(out.endsWith("\n\n")).toBe(false);
+  });
+  it("represents errored turns with nulls and error string", () => {
+    const errored: AuditResult = {
+      ...SAMPLE,
+      agents: {
+        claude: {
+          turns: [{ fresh: null, cached: null, pct: null, error: "exit 1" }],
+          verdict: "investigate",
+          verdictPct: 0,
+          providerNote: null,
+        },
+      },
+    };
+    const parsed = JSON.parse(renderJsonOutput(errored));
+    expect(parsed.agents.claude.turns[0]).toEqual({
+      fresh: null, cached: null, pct: null, error: "exit 1",
+    });
   });
 });

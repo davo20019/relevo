@@ -257,3 +257,7 @@ export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): st
 
   return lines.join("\n") + "\n";
 }
+
+export function renderJsonOutput(r: AuditResult): string {
+  return JSON.stringify(r) + "\n";
+}
