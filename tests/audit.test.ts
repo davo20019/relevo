@@ -12,9 +12,10 @@ import {
   scanClaudeHooks,
   runScanner,
   SCANNERS,
+  renderTextOutput,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
-import type { Offender } from "../src/audit.js";
+import type { AuditResult, Offender } from "../src/audit.js";
 
 const tempDirs: string[] = [];
 function tmp(): string {
@@ -185,5 +186,95 @@ describe("scanner registry", () => {
   });
   it("has claude registered", () => {
     expect(typeof SCANNERS.claude).toBe("function");
+  });
+});
+
+const SAMPLE: AuditResult = {
+  prompt: "Reply with exactly the word OK. No other text.",
+  turns: 4,
+  agents: {
+    claude: {
+      turns: [
+        { fresh: 14212, cached: 0, pct: null, error: null },
+        { fresh: 142, cached: 13981, pct: 0.99, error: null },
+        { fresh: 142, cached: 14053, pct: 0.99, error: null },
+        { fresh: 142, cached: 14089, pct: 0.99, error: null },
+      ],
+      verdict: "excellent",
+      verdictPct: 0.99,
+      providerNote: null,
+    },
+    codex: {
+      turns: [
+        { fresh: 8140, cached: 0, pct: null, error: null },
+        { fresh: 8140, cached: 4096, pct: 0.33, error: null },
+        { fresh: 8140, cached: 4096, pct: 0.33, error: null },
+        { fresh: 8140, cached: 4096, pct: 0.33, error: null },
+      ],
+      verdict: "investigate",
+      verdictPct: 0.33,
+      providerNote: "provider-typical for codex",
+    },
+  },
+  skipped: { opencode: "no structured parser" },
+  hookScan: { claude: [], codex: "no-scanner" },
+};
+
+describe("renderTextOutput", () => {
+  it("includes both agent tables", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    expect(out).toContain("claude");
+    expect(out).toContain("codex");
+  });
+  it("softens codex verdict via qualifier and includes Notes section", () => {
+    const out = renderTextOutput(SAMPLE, { explain: true });
+    expect(out).toContain("verdict: ok (provider-typical for codex — see Notes)");
+    expect(out).toContain("Notes:");
+    expect(out).toMatch(/codex caches less aggressively/);
+  });
+  it("omits Notes section when codex is not audited", () => {
+    const { codex, ...rest } = SAMPLE.agents;
+    const noCodex: AuditResult = { ...SAMPLE, agents: rest, hookScan: { claude: [] } };
+    expect(renderTextOutput(noCodex, { explain: true })).not.toContain("Notes:");
+  });
+  it("renders em-dash for turn-1 pct (no cache to read)", () => {
+    expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/^\s*1\s+14,212\s+0\s+—/m);
+  });
+  it("renders '(none detected)' for an empty claude offender list", () => {
+    expect(renderTextOutput(SAMPLE, { explain: true })).toContain("claude:  (none detected)");
+  });
+  it("renders 'scanner not yet implemented' for no-scanner sentinel", () => {
+    expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/codex:\s+scanner not yet implemented/);
+  });
+  it("includes skipped agents in a leading skipped: line", () => {
+    expect(renderTextOutput(SAMPLE, { explain: true })).toMatch(/skipped:\s+opencode \(no structured parser\)/);
+  });
+  it("omits the entire offender section when explain is false", () => {
+    const out = renderTextOutput(SAMPLE, { explain: false });
+    expect(out).not.toContain("Likely cache offenders");
+    expect(out).not.toContain("scanner not yet implemented");
+    expect(out).not.toContain("(none detected)");
+  });
+  it("renders 'verdict: error — N/M turns failed' when any turn errored", () => {
+    const errored: AuditResult = {
+      ...SAMPLE,
+      agents: {
+        claude: {
+          turns: [
+            { fresh: 100, cached: 900, pct: 0.9, error: null },
+            { fresh: null, cached: null, pct: null, error: "exit 1" },
+            { fresh: 100, cached: 900, pct: 0.9, error: null },
+            { fresh: null, cached: null, pct: null, error: "exit 1" },
+          ],
+          verdict: "investigate",
+          verdictPct: 0,
+          providerNote: null,
+        },
+      },
+      hookScan: { claude: [] },
+    };
+    const out = renderTextOutput(errored, { explain: true });
+    expect(out).toContain("verdict: error — 2/4 turns failed");
+    expect(out).not.toContain("verdict: investigate");
   });
 });

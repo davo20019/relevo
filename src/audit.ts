@@ -180,3 +180,80 @@ export function runScanner(agentName: string): ScannerOutput {
   const fn = SCANNERS[agentName];
   return fn ? fn() : "no-scanner";
 }
+
+const CODEX_NOTE =
+  "codex caches less aggressively than claude/cursor at the API level. Cache rates in the\n" +
+  "  25–45% range are typical and not indicative of a config issue.";
+
+function fmtNum(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+export function renderTextOutput(r: AuditResult, opts: { explain: boolean }): string {
+  const lines: string[] = [];
+  lines.push(`relevo audit — ${r.turns} turns, prompt: ${JSON.stringify(r.prompt)}`);
+  lines.push("");
+
+  const skippedNames = Object.keys(r.skipped);
+  if (skippedNames.length > 0) {
+    const parts = skippedNames.map((n) => `${n} (${r.skipped[n]})`);
+    lines.push(`skipped: ${parts.join(", ")}`);
+    lines.push("");
+  }
+
+  for (const [name, agent] of Object.entries(r.agents)) {
+    lines.push(name);
+    lines.push("  turn  fresh    cached   cache%");
+    agent.turns.forEach((t, i) => {
+      const turnNo = String(i + 1);
+      if (t.error) {
+        lines.push(`  ${turnNo.padEnd(5)} ${"—".padEnd(8)} ${"—".padEnd(8)} err`);
+      } else {
+        const pct = t.pct === null ? "—" : `${Math.round(t.pct * 100)}%`;
+        lines.push(
+          `  ${turnNo.padEnd(5)} ${fmtNum(t.fresh!).padEnd(8)} ${fmtNum(t.cached!).padEnd(8)} ${pct}`,
+        );
+      }
+    });
+    // Any errored turn overrides the numeric verdict (spec failure-modes rule).
+    const failed = agent.turns.filter((t) => t.error !== null).length;
+    if (failed > 0) {
+      lines.push(`  verdict: error — ${failed}/${agent.turns.length} turns failed`);
+    } else {
+      const text = displayVerdictText(agent.verdict, agent.verdictPct, agent.providerNote, agent.turns.length);
+      lines.push(`  verdict: ${text}`);
+    }
+    lines.push("");
+  }
+
+  if (Object.keys(r.agents).some((n) => n === "codex")) {
+    lines.push("Notes:");
+    lines.push(`  ${CODEX_NOTE}`);
+    lines.push("");
+  }
+
+  if (opts.explain) {
+    lines.push("Likely cache offenders:");
+    for (const name of Object.keys(r.agents)) {
+      const scan = r.hookScan[name];
+      if (scan === "no-scanner" || scan === undefined) {
+        lines.push(`  ${name}:  scanner not yet implemented`);
+        continue;
+      }
+      if (scan.length === 0) {
+        lines.push(`  ${name}:  (none detected)`);
+        continue;
+      }
+      lines.push(`  ${name}:`);
+      for (const off of scan) {
+        lines.push(`    • ${off.name}`);
+        lines.push(`      file:    ${off.file}`);
+        lines.push(`      pattern: ${off.pattern}`);
+        lines.push(`      effect:  ${off.effect}`);
+        lines.push(`      patch:   ${off.patch}`);
+      }
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
