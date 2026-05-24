@@ -10,6 +10,8 @@ import {
   providerQualifier,
   displayVerdictText,
   scanClaudeHooks,
+  runScanner,
+  SCANNERS,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { Offender } from "../src/audit.js";
@@ -172,5 +174,16 @@ describe("scanClaudeHooks", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "hooks.json"), "{not json");
     expect(scanClaudeHooks(home)).toEqual([]);
+  });
+});
+
+describe("scanner registry", () => {
+  it("returns no-scanner for unregistered agents", () => {
+    expect(runScanner("codex")).toBe("no-scanner");
+    expect(runScanner("cursor")).toBe("no-scanner");
+    expect(runScanner("opencode")).toBe("no-scanner");
+  });
+  it("has claude registered", () => {
+    expect(typeof SCANNERS.claude).toBe("function");
   });
 });

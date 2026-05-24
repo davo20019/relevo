@@ -171,3 +171,12 @@ function pluginNameFromPath(root: string, file: string): string {
   if (parts.length >= 4) return `${parts[parts.length - 4]}@${parts[parts.length - 3]}`;
   return rel;
 }
+
+export const SCANNERS: Record<string, CliScanner> = {
+  claude: () => scanClaudeHooks(),
+};
+
+export function runScanner(agentName: string): ScannerOutput {
+  const fn = SCANNERS[agentName];
+  return fn ? fn() : "no-scanner";
+}
