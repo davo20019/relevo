@@ -2,6 +2,9 @@
 // types → pure helpers → scanner → renderers → runner → entry.
 
 import type { TokenUsage } from "./parsers.js";
+import type { AgentSpec } from "./config.js";
+import { agentCommandName, agentIsEnabled } from "./config.js";
+import which from "./which.js";
 
 export type TurnResult = {
   fresh: number | null;   // null when the turn errored
@@ -43,4 +46,31 @@ export function tokenMetrics(t: TokenUsage): { fresh: number; cached: number; pc
   const cached = t.cacheRead;
   const denom = fresh + cached;
   return { fresh, cached, pct: denom > 0 ? cached / denom : null };
+}
+
+const STRUCTURED_PARSERS = new Set(["claude-json", "codex-json", "cursor-json"]);
+
+export function auditabilityReason(
+  _name: string,
+  spec: AgentSpec,
+  whichFn: (n: string) => string | null = which,
+): string | null {
+  if (!agentIsEnabled(spec)) return "disabled";
+  const cmd = agentCommandName(spec);
+  if (!cmd) return "no command";
+  if (!whichFn(cmd)) return `not installed (binary '${cmd}' not on PATH)`;
+  if (!spec.parser || !STRUCTURED_PARSERS.has(spec.parser)) {
+    return `no structured parser (got '${spec.parser ?? "raw"}'; need one of ${[...STRUCTURED_PARSERS].join(", ")})`;
+  }
+  if (!spec.resume_template) return "no resume_template";
+  return null;
+}
+
+export function auditableAgentNames(
+  specs: Record<string, AgentSpec>,
+  whichFn: (n: string) => string | null = which,
+): string[] {
+  return Object.entries(specs)
+    .filter(([name, spec]) => auditabilityReason(name, spec, whichFn) === null)
+    .map(([name]) => name);
 }
