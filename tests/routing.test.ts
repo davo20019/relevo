@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   expandAll,
   isKnownCommand,
+  parseAfterCommand,
   parseLine,
   parseMulti,
   prepareDispatchLine,
@@ -77,9 +78,9 @@ describe("smartRoute", () => {
 });
 
 describe("new slash commands", () => {
-  it("recognizes /focus as a slash command", () => {
-    expect(isKnownCommand("/focus @claude")).toBe(true);
-    expect(smartRoute("/focus @claude", ["claude"])).toBe("/focus @claude");
+  it("recognizes /default as a slash command", () => {
+    expect(isKnownCommand("/default @claude")).toBe(true);
+    expect(smartRoute("/default @claude", ["claude"])).toBe("/default @claude");
   });
 
   it("recognizes /sync as a slash command", () => {
@@ -87,6 +88,28 @@ describe("new slash commands", () => {
     expect(smartRoute("/sync @claude @codex", ["claude", "codex"])).toBe(
       "/sync @claude @codex",
     );
+  });
+
+  it("recognizes /after as a slash command", () => {
+    expect(isKnownCommand("/after @codex: @cursor implement findings")).toBe(true);
+  });
+
+  it("recognizes /cancel as a slash command", () => {
+    expect(isKnownCommand("/cancel @cursor")).toBe(true);
+    expect(isKnownCommand("/cancel cursor")).toBe(true);
+  });
+
+  it("parses /after target and body", () => {
+    expect(parseAfterCommand("/after @codex: @cursor implement findings"))
+      .toEqual({ targetAgent: "codex", body: "@cursor implement findings" });
+  });
+
+  it("rejects /after without a colon", () => {
+    expect(parseAfterCommand("/after @codex @cursor go")).toBeNull();
+  });
+
+  it("rejects /after without a leading @", () => {
+    expect(parseAfterCommand("/after codex: @cursor go")).toBeNull();
   });
 });
 
@@ -98,14 +121,14 @@ describe("prepareDispatchLine pending-prompt round-trip", () => {
     expect(state.pendingPrompt).toBe("review the latest diff");
   });
 
-  it("routes untagged input to the focused agent", () => {
+  it("routes untagged input to the default agent", () => {
     const state = { pendingPrompt: null as string | null };
     const routed = prepareDispatchLine("fix the tests", ["claude", "codex"], state, "claude");
     expect(routed).toBe("@claude fix the tests");
     expect(state.pendingPrompt).toBeNull();
   });
 
-  it("explicit mentions override focus without changing routing prep", () => {
+  it("explicit mentions override the default without changing routing prep", () => {
     const state = { pendingPrompt: null as string | null };
     const routed = prepareDispatchLine("@codex ship it", ["claude", "codex"], state, "claude");
     expect(routed).toBe("@codex ship it");

@@ -132,14 +132,14 @@ export function prepareDispatchLine(
   line: string,
   knownAgents: string[],
   state: Pending,
-  focusAgent: string | null = null,
+  defaultAgent: string | null = null,
 ): string | null {
   const routed = smartRoute(line, knownAgents);
   const parsed = parseLine(routed);
   if (parsed.kind === "untagged") {
-    if (focusAgent && knownAgents.includes(focusAgent)) {
+    if (defaultAgent && knownAgents.includes(defaultAgent)) {
       state.pendingPrompt = null;
-      return parsed.content ? `@${focusAgent} ${parsed.content}` : `@${focusAgent}`;
+      return parsed.content ? `@${defaultAgent} ${parsed.content}` : `@${defaultAgent}`;
     }
     state.pendingPrompt = parsed.content;
     return null;
@@ -158,6 +158,12 @@ export function prepareDispatchLine(
     state.pendingPrompt = null;
   }
   return routed;
+}
+
+export function parseAfterCommand(line: string): { targetAgent: string; body: string } | null {
+  const m = line.trim().match(/^\/after\s+@([A-Za-z0-9_\-]+)\s*:\s*(.+)$/);
+  if (!m) return null;
+  return { targetAgent: m[1]!, body: m[2]!.trim() };
 }
 
 export function requestedPeerAgents(

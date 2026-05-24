@@ -8,8 +8,18 @@ import {
   idleSeconds,
   lastActivityPreview,
   newRun,
+  tokensSuffix,
   type AgentRunState,
 } from "../src/run.js";
+
+describe("newRun", () => {
+  it("assigns a unique id to each new run", () => {
+    const a = newRun("codex", "#fff", "p1");
+    const b = newRun("codex", "#fff", "p2");
+    expect(a.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a.id).not.toBe(b.id);
+  });
+});
 
 describe("activitySuffix", () => {
   it("is empty when nothing happened", () => {
@@ -17,7 +27,7 @@ describe("activitySuffix", () => {
     expect(activitySuffix(r)).toBe("");
   });
 
-  it("includes commands, edits, tools, and tokens", () => {
+  it("includes commands, edits, and tools but not tokens", () => {
     const r = newRun("a", "cyan", "p");
     r.nCommands = 1;
     r.nEdits = 2;
@@ -27,33 +37,41 @@ describe("activitySuffix", () => {
     expect(s).toContain("1 cmd");
     expect(s).toContain("2 edits");
     expect(s).toContain("14 tools");
-    expect(s).toMatch(/\bin\b.*\bout\b/);
+    // Tokens render in the bottom border (tokensSuffix), not the header.
+    expect(s).not.toMatch(/\bin\b.*\bout\b/);
+  });
+});
+
+describe("tokensSuffix", () => {
+  it("is empty when no totals have arrived", () => {
+    const r = newRun("a", "cyan", "p");
+    expect(tokensSuffix(r)).toBe("");
   });
 
-  it("omits the token slice when totals are zero", () => {
+  it("is empty when totals are all zero", () => {
     const r = newRun("a", "cyan", "p");
     r.tokens = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
-    expect(activitySuffix(r)).toBe("");
+    expect(tokensSuffix(r)).toBe("");
   });
 
   it("splits fresh vs cached tokens so cache reads are visible", () => {
     const r = newRun("a", "cyan", "p");
     // turn 2-style: small new prompt, big cache hit on the system prompt
     r.tokens = { input: 2000, output: 143, cacheRead: 33000, cacheCreate: 0 };
-    expect(activitySuffix(r)).toContain("2k + 33k cached in / 143 out");
+    expect(tokensSuffix(r)).toBe("2k + 33k cached in / 143 out");
   });
 
   it("treats cache writes as fresh since they bill at full price", () => {
     const r = newRun("a", "cyan", "p");
     // turn 1-style: no cache hits yet, system prompt is being written into cache
     r.tokens = { input: 2000, output: 32, cacheRead: 0, cacheCreate: 30000 };
-    expect(activitySuffix(r)).toContain("32k in / 32 out");
+    expect(tokensSuffix(r)).toBe("32k in / 32 out");
   });
 
   it("drops the `+` when there's only cached input", () => {
     const r = newRun("a", "cyan", "p");
     r.tokens = { input: 0, output: 10, cacheRead: 5000, cacheCreate: 0 };
-    expect(activitySuffix(r)).toContain("5k cached in / 10 out");
+    expect(tokensSuffix(r)).toBe("5k cached in / 10 out");
   });
 });
 

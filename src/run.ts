@@ -18,6 +18,7 @@ import { projectDir } from "./paths.js";
 import { shlexSplit } from "./shlex.js";
 
 export type AgentRunState = {
+  id: string;
   agentName: string;
   color: string;
   start: number;
@@ -33,6 +34,10 @@ export type AgentRunState = {
   interrupted: boolean;
   liveMaxLines: number | null;
   prompt: string;
+  // True when this run was dispatched while at least one other agent was
+  // already in flight. Used to drive compact "started/done in background"
+  // notifications — foreground runs are already visible via the live panel.
+  background: boolean;
   // Last-activity previews so an idle-looking panel can show *what* the agent
   // is currently doing (Read/Grep streaks otherwise produce nothing visible).
   lastCommand: string | null;
@@ -49,9 +54,11 @@ export function newRun(
   color: string,
   prompt: string,
   liveMaxLines: number | null = null,
+  background: boolean = false,
 ): AgentRunState {
   const start = Date.now();
   return {
+    id: randomUUID(),
     agentName,
     color,
     start,
@@ -72,6 +79,7 @@ export function newRun(
     lastTool: null,
     lastActivityAt: start,
     tokens: null,
+    background,
   };
 }
 
@@ -91,9 +99,13 @@ export function activitySuffix(run: AgentRunState): string {
   if (run.nCommands) parts.push(`${run.nCommands} cmd${run.nCommands === 1 ? "" : "s"}`);
   if (run.nEdits) parts.push(`${run.nEdits} edit${run.nEdits === 1 ? "" : "s"}`);
   if (run.nTools) parts.push(`${run.nTools} tool${run.nTools === 1 ? "" : "s"}`);
-  const tok = formatTokens(run.tokens);
-  if (tok) parts.push(tok);
   return parts.length ? " · " + parts.join(" · ") : "";
+}
+
+// Token usage gets its own line (rendered in the bottom border) so the header
+// stays readable when both activity counts and token totals are present.
+export function tokensSuffix(run: AgentRunState): string {
+  return formatTokens(run.tokens);
 }
 
 function formatNum(n: number): string {

@@ -24,8 +24,8 @@ export function Separator({
     );
   }
 
-  const leftPad = 3;
   const labelPart = ` ${label} `;
+  const leftPad = Math.max(3, Math.floor((total - labelPart.length) / 2));
   const right = Math.max(0, total - leftPad - labelPart.length);
   return (
     <Box marginTop={1} marginBottom={1}>

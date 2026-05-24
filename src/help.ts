@@ -1,4 +1,4 @@
-import type { AgentConfig } from "./config.js";
+import { type AgentConfig, unavailableAgentReasons } from "./config.js";
 import { projectDir, transcriptDir } from "./paths.js";
 import { getActiveTask } from "./tasks.js";
 
@@ -6,12 +6,25 @@ function safeTranscriptDir(): string {
   return getActiveTask() ? transcriptDir() : "(none yet)";
 }
 
+function annotateAgent(name: string, reason: string | undefined): string {
+  if (!reason) return `@${name}`;
+  if (reason === "disabled") return `@${name} (off)`;
+  if (reason === "not installed") return `@${name} (missing)`;
+  return `@${name} (${reason})`;
+}
+
 export function buildHelpText(config: AgentConfig): string {
+  const reasons = unavailableAgentReasons(config.agents);
   const agents = Object.keys(config.agents)
-    .map((n) => `@${n}`)
+    .map((n) => annotateAgent(n, reasons[n]))
     .join(", ");
   return `
 relevo
+
+Pattern: one writer at a time. Use multiple agents for parallel review or
+exploration; chain writers serially (e.g. @claude reviews, then @cursor
+implements). Parallel writers on the same files will stomp each other —
+relevo dispatches and renders but does not coordinate file access.
 
 Usage:
   @<agent> <prompt>            dispatch to one agent
@@ -30,12 +43,14 @@ Usage:
   /resume             list recent tasks; /resume <n> to pick one
 
   /open <agent>       open agent's CLI natively in a new window, resumed at this session
-  /focus <agent>      set global default (all projects, future sessions)
-  /focus global <agent>   same as /focus <agent>
-  /focus local <agent>    project override in .relay/settings.json
-  /focus session <agent>  temporary override until quit
-  /focus              show global, project, and active default
-  /focus clear [global|local|session]  clear saved or session default
+  /default <agent>      set global default agent (all projects, future sessions)
+  /default global <agent>   same as /default <agent>
+  /default local <agent>    project override in .relay/settings.json
+  /default session <agent>  temporary override until quit
+  /default              show global, project, and active default
+  /default clear [global|local|session]  clear saved or session default
+  /after @agent: <prompt>  queue prompt after that agent's current/last run
+                           finishes (fires on any terminal state)
   /sync [@agents...]  reserved; task-state sync is not implemented yet
 
   /image <path>       queue an image to attach to the next dispatch
@@ -51,6 +66,7 @@ Usage:
   /cwd                show the working directory
   /verbose            toggle showing each command/edit an agent runs (default: hidden)
   /quiet              turn verbose off
+  /cancel @<agent>     cancel only that agent's active run(s); Esc still cancels all
   /help               this message
   /exit               quit
 

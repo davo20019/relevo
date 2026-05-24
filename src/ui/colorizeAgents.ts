@@ -13,16 +13,18 @@ const MENTION_RE = /(\B@[A-Za-z0-9_-]+)|(\/open\s+)([A-Za-z0-9_-]+)/g;
 export function colorizeAgentMentions(
   text: string,
   agentColor: Record<string, string>,
+  liveAgents?: ReadonlySet<string> | null,
 ): Segment[] {
   const out: Segment[] = [];
   let lastIdx = 0;
+  const isLive = (name: string) => !liveAgents || liveAgents.has(name);
   for (const m of text.matchAll(MENTION_RE)) {
     const matchStart = m.index ?? 0;
     const matchEnd = matchStart + m[0].length;
     if (m[1]) {
       const name = m[1].slice(1);
       const color = agentColor[name];
-      if (color) {
+      if (color && isLive(name)) {
         if (matchStart > lastIdx) out.push({ text: text.slice(lastIdx, matchStart) });
         out.push({ text: m[1], color, bold: true });
         lastIdx = matchEnd;
@@ -31,7 +33,7 @@ export function colorizeAgentMentions(
       const cmd = m[2];
       const name = m[3];
       const color = agentColor[name];
-      if (color) {
+      if (color && isLive(name)) {
         if (matchStart > lastIdx) out.push({ text: text.slice(lastIdx, matchStart) });
         out.push({ text: cmd });
         out.push({ text: name, color, bold: true });

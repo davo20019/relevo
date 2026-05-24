@@ -6,6 +6,7 @@ import {
   hiddenLines,
   idleSeconds,
   lastActivityPreview,
+  tokensSuffix,
   type AgentRunState,
 } from "../run.js";
 import { renderMarkdown } from "./markdown.js";
@@ -16,8 +17,9 @@ const SPINNER_FRAMES = ["◜", "◝", "◞", "◟"];
 
 // 4-frame dot cycle for active labels. Padded so the line width doesn't jitter
 // as the dots grow.
-const DOT_FRAMES = ["   ", ".  ", ".. ", "..."];
-const WAITING_PHRASES = ["thinking", "working", "checking", "reading"];
+const DOT_FRAMES = ["·", "··", "···"];
+/** Below this width, panel headers drop the status word and use shorter labels. */
+const COMPACT_HEADER_WIDTH = 68;
 
 type Status = "running" | "done" | "error" | "cancelled" | "interrupted";
 
@@ -45,6 +47,14 @@ const STATUS_LABEL: Record<Status, string> = {
   interrupted: "interrupted",
 };
 
+const COMPACT_STATUS_LABEL: Record<Status, string> = {
+  running: "",
+  done: "",
+  error: "err",
+  cancelled: "x",
+  interrupted: "x",
+};
+
 const STATUS_COLOR: Record<Status, string> = {
   running: "cyan", // overridden by agent color below
   done: "green",
@@ -68,6 +78,7 @@ export function AgentPanel({
     ? SPINNER_FRAMES[Math.floor(elapsed * 4) % SPINNER_FRAMES.length]!
     : STATUS_GLYPH[status];
   const suffix = activitySuffix(run);
+  const tokens = tokensSuffix(run);
   const text = displayText(run);
   const hidden = hiddenLines(run);
   const hasContent = text.trim().length > 0;
@@ -75,16 +86,38 @@ export function AgentPanel({
   const borderColor = run.color;
   const glyphColor = isRunning ? run.color : STATUS_COLOR[status];
 
-  const statusLabel = STATUS_LABEL[status];
+  const compact = width !== undefined && width < COMPACT_HEADER_WIDTH;
+  const statusLabel = compact ? COMPACT_STATUS_LABEL[status] : STATUS_LABEL[status];
   const elapsedStr = `${elapsed.toFixed(0)}s`;
+  const statusGap = statusLabel ? (compact ? " " : "  ") : compact ? " " : "  ";
+  // Gap between the status label and the elapsed counter. Must be a single
+  // string so titleVisible measures the same thing JSX renders — otherwise
+  // the top border's ─╮ corner drifts away from the box's right edge.
+  const postStatusGap = statusLabel ? (compact ? " " : "  ") : "";
   // Header text laid into the top border line. Spaces around the title give
   // it breathing room from the corner chars.
-  // Visible width: " " + glyph + " @" + name + "  " + status + "  " + elapsed + suffix + " "
   const titleVisible =
-    1 + 1 + 2 + run.agentName.length + 2 + statusLabel.length + 2 + elapsedStr.length + suffix.length + 1;
+    1 +
+    1 +
+    2 +
+    run.agentName.length +
+    statusGap.length +
+    statusLabel.length +
+    postStatusGap.length +
+    elapsedStr.length +
+    suffix.length +
+    1;
   // Top: ╭─{title}{filler}─╮ → overhead = 2 (╭─) + 2 (─╮) = 4
   const overhead = 4;
   const fillerCount = Math.max(0, (width ?? overhead + titleVisible) - overhead - titleVisible);
+  // Bottom border mirrors the top: ╰─ {tokens} {filler}─╯. Tokens live here
+  // (instead of crowding the header) so cmd/edit counts and token totals
+  // each get their own visual row.
+  const tokensVisible = tokens ? 1 + tokens.length + 1 : 0;
+  const bottomFillerCount = Math.max(
+    0,
+    (width ?? overhead + tokensVisible) - overhead - tokensVisible,
+  );
 
   return (
     <Box flexDirection="column" width={width}>
@@ -99,9 +132,9 @@ export function AgentPanel({
           {run.agentName}
         </Text>
         <Text dimColor>
-          {"  "}
+          {statusGap}
           {statusLabel}
-          {"  "}
+          {postStatusGap}
           {elapsedStr}
           {suffix}
           {" "}
@@ -115,6 +148,7 @@ export function AgentPanel({
         borderStyle="round"
         borderColor={borderColor}
         borderTop={false}
+        borderBottom={false}
         flexDirection="column"
         paddingX={1}
       >
@@ -133,6 +167,19 @@ export function AgentPanel({
           )}
         </Box>
       </Box>
+      <Box flexDirection="row">
+        <Text color={borderColor}>╰─</Text>
+        {tokens ? (
+          <Text dimColor>
+            {" "}
+            {tokens}{" "}
+          </Text>
+        ) : null}
+        <Text color={borderColor}>
+          {"─".repeat(bottomFillerCount)}
+          ─╯
+        </Text>
+      </Box>
     </Box>
   );
 }
@@ -143,9 +190,7 @@ export function AgentPanel({
 const IDLE_QUIET_SECONDS = 120;
 
 export function formatWaitingStatus(elapsed: number): string {
-  const phrase = WAITING_PHRASES[Math.floor(elapsed / 6) % WAITING_PHRASES.length]!;
-  const dots = DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
-  return `${phrase}${dots}`;
+  return DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
 }
 
 function WaitingLine({
@@ -181,7 +226,7 @@ function WaitingLine({
     <>
       <Text dimColor>{shown}</Text>
       <Text dimColor>
-        ...{waitingStatus.trimEnd()}
+        {waitingStatus}
         {idle >= IDLE_QUIET_SECONDS && (
           <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
         )}

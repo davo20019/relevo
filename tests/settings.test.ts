@@ -1,14 +1,14 @@
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  formatFocusStatus,
-  loadPersistedFocus,
-  parseFocusCommand,
-  resolveEffectiveFocus,
-  saveGlobalFocusAgent,
-  saveProjectFocusAgent,
+  formatDefaultStatus,
+  loadPersistedDefault,
+  parseDefaultCommand,
+  resolveEffectiveDefault,
+  saveGlobalDefaultAgent,
+  saveProjectDefaultAgent,
 } from "../src/settings.js";
 
 const tempRoots: string[] = [];
@@ -25,40 +25,40 @@ afterEach(() => {
   }
 });
 
-describe("parseFocusCommand", () => {
+describe("parseDefaultCommand", () => {
   it("parses show, set, and clear variants", () => {
-    expect(parseFocusCommand("/focus")).toEqual({ kind: "show" });
-    expect(parseFocusCommand("/focus claude")).toEqual({
+    expect(parseDefaultCommand("/default")).toEqual({ kind: "show" });
+    expect(parseDefaultCommand("/default claude")).toEqual({
       kind: "set",
       scope: "global",
       agent: "claude",
     });
-    expect(parseFocusCommand("/focus global codex")).toEqual({
+    expect(parseDefaultCommand("/default global codex")).toEqual({
       kind: "set",
       scope: "global",
       agent: "codex",
     });
-    expect(parseFocusCommand("/focus local cursor")).toEqual({
+    expect(parseDefaultCommand("/default local cursor")).toEqual({
       kind: "set",
       scope: "local",
       agent: "cursor",
     });
-    expect(parseFocusCommand("/focus clear global")).toEqual({
+    expect(parseDefaultCommand("/default clear global")).toEqual({
       kind: "clear",
       scope: "global",
     });
-    expect(parseFocusCommand("/focus clear local")).toEqual({
+    expect(parseDefaultCommand("/default clear local")).toEqual({
       kind: "clear",
       scope: "local",
     });
-    expect(parseFocusCommand("/focus clear session")).toEqual({
+    expect(parseDefaultCommand("/default clear session")).toEqual({
       kind: "clear",
       scope: "session",
     });
   });
 });
 
-describe("persisted focus", () => {
+describe("persisted default", () => {
   it("prefers project override over global", () => {
     const home = tempDir();
     const project = tempDir();
@@ -66,9 +66,12 @@ describe("persisted focus", () => {
     const cwd = process.cwd();
     try {
       process.chdir(project);
-      saveGlobalFocusAgent("claude", { homeDir: home });
-      saveProjectFocusAgent("codex");
-      expect(loadPersistedFocus({ homeDir: home })).toEqual({ agent: "codex", source: "local" });
+      saveGlobalDefaultAgent("claude", { homeDir: home });
+      saveProjectDefaultAgent("codex");
+      expect(loadPersistedDefault({ homeDir: home })).toEqual({
+        agent: "codex",
+        source: "local",
+      });
     } finally {
       process.chdir(cwd);
     }
@@ -76,19 +79,19 @@ describe("persisted focus", () => {
 
   it("resolves session override ahead of persisted defaults", () => {
     const persisted = { agent: "claude", source: "global" as const };
-    expect(resolveEffectiveFocus("codex", persisted, ["claude", "codex"])).toBe("codex");
-    expect(resolveEffectiveFocus(null, persisted, ["claude", "codex"])).toBe("claude");
+    expect(resolveEffectiveDefault("codex", persisted, ["claude", "codex"])).toBe("codex");
+    expect(resolveEffectiveDefault(null, persisted, ["claude", "codex"])).toBe("claude");
   });
 
   it("ignores unavailable persisted agents", () => {
     const persisted = { agent: "claude", source: "global" as const };
-    expect(resolveEffectiveFocus(null, persisted, ["codex"])).toBeNull();
+    expect(resolveEffectiveDefault(null, persisted, ["codex"])).toBeNull();
   });
 });
 
-describe("formatFocusStatus", () => {
+describe("formatDefaultStatus", () => {
   it("lists active, global, project, and session override", () => {
-    const text = formatFocusStatus({
+    const text = formatDefaultStatus({
       effective: "codex",
       sessionOverride: null,
       globalAgent: "claude",
@@ -100,13 +103,27 @@ describe("formatFocusStatus", () => {
   });
 });
 
-describe("saveGlobalFocusAgent", () => {
+describe("saveGlobalDefaultAgent", () => {
   it("writes global settings under config home", () => {
     const home = tempDir();
     const settingsPath = path.join(home, ".config", "relevo", "settings.json");
-    saveGlobalFocusAgent("claude", { homeDir: home });
+    saveGlobalDefaultAgent("claude", { homeDir: home });
     expect(existsSync(settingsPath)).toBe(true);
-    expect(loadPersistedFocus({ homeDir: home })).toEqual({
+    expect(loadPersistedDefault({ homeDir: home })).toEqual({
+      agent: "claude",
+      source: "global",
+    });
+  });
+});
+
+describe("legacy focus_agent migration", () => {
+  it("reads pre-rename focus_agent key as default", () => {
+    const home = tempDir();
+    const settingsDir = path.join(home, ".config", "relevo");
+    mkdirSync(settingsDir, { recursive: true });
+    const settingsPath = path.join(settingsDir, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ focus_agent: "claude" }) + "\n", "utf8");
+    expect(loadPersistedDefault({ homeDir: home })).toEqual({
       agent: "claude",
       source: "global",
     });

@@ -24,6 +24,11 @@ interactive CLI, `/open <agent>` continues the native session in a new window.
 > /open claude
 ```
 
+> **One writer at a time.** Use multiple agents in parallel for review or
+> exploration; chain writers serially (review first, then implement). Parallel
+> writers on the same files will stomp each other — relevo dispatches and
+> renders, but does not coordinate file access between CLIs.
+
 ## Requirements
 
 - Node.js 20+
@@ -108,8 +113,8 @@ npm run dev   # or: npm run build && npm start
   to `@codex review this`.
 - If you submit a prompt without an agent tag, relevo keeps it pending and
   asks you to pick an agent. Type `@codex` or another agent tag to send that
-  saved prompt. Use `/focus <agent>` to set a global default recipient so
-  untagged prompts go there in every future session. Use `/focus local <agent>`
+  saved prompt. Use `/default <agent>` to set a global default recipient so
+  untagged prompts go there in every future session. Use `/default local <agent>`
   for a per-project override in `.relay/settings.json`.
 - Other agents' turns are not prepended by default. Mention a peer agent in the
   prompt when you want handoff context, such as
@@ -138,9 +143,9 @@ One relevo terminal represents one task. Agents inside that terminal share the
 same working directory and task transcripts. Use `@agent` mentions to route
 prompts to one or more collaborators in that task.
 
-Relevo keeps chronological scrollback as the source of truth. `/focus` sets the
+Relevo keeps chronological scrollback as the source of truth. `/default` sets the
 default recipient for untagged prompts (global and optional per-project); explicit
-`@other` mentions still override for that line without changing focus.
+`@other` mentions still override for that line without changing the default.
 
 ## Worktrees
 
@@ -176,12 +181,14 @@ relevo
 | `/task rename <new>` | rename the current task |
 | `/resume` | list recent tasks; `/resume <n>` switches to one |
 | `/open <agent>` | open a resumable native session in a new terminal window |
-| `/focus <agent>` | set global default recipient (all projects, future sessions) |
-| `/focus global <agent>` | same as `/focus <agent>` |
-| `/focus local <agent>` | project override in `.relay/settings.json` |
-| `/focus session <agent>` | temporary override until quit |
-| `/focus` | show global, project, and active default |
-| `/focus clear [global\|local\|session]` | clear saved or session default |
+| `/default <agent>` | set global default recipient (all projects, future sessions) |
+| `/default global <agent>` | same as `/default <agent>` |
+| `/default local <agent>` | project override in `.relay/settings.json` |
+| `/default session <agent>` | temporary override until quit |
+| `/default` | show global, project, and active default |
+| `/default clear [global\|local\|session]` | clear saved or session default |
+| `/after @agent: <prompt>` | queue a prompt to fire after that agent's current/last run finishes (any terminal state) |
+| `/cancel @<agent>` | cancel only that agent's active run(s); Esc still cancels every active run |
 | `/sync [@agents...]` | reserved for task-state rebroadcasting; not implemented yet |
 | `/image <path>` | queue an image file for the next dispatch |
 | `/image paste` | queue the clipboard image, requires `pngpaste` |

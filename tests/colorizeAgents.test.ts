@@ -60,4 +60,18 @@ describe("colorizeAgentMentions", () => {
       { text: "@cursor", color: "green", bold: true },
     ]);
   });
+
+  it("renders @mentions plain when the agent is not in the live set", () => {
+    const live = new Set(["claude"]);
+    expect(colorizeAgentMentions("@claude vs @codex", colors, live)).toEqual([
+      { text: "@claude", color: "magenta", bold: true },
+      { text: " vs @codex" },
+    ]);
+  });
+
+  it("treats a null live set as 'all live' (backwards compatible)", () => {
+    expect(colorizeAgentMentions("@claude", colors, null)).toEqual([
+      { text: "@claude", color: "magenta", bold: true },
+    ]);
+  });
 });

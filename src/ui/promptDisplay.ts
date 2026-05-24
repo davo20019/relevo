@@ -11,7 +11,7 @@ const readOnlyPending = {
 export function buildCompactDisplayPrompt(
   compactLine: string,
   knownAgents: string[],
-  focusAgent: string | null,
+  defaultAgent: string | null,
 ): string {
   const trimmed = compactLine.trim();
   if (!trimmed) return "";
@@ -26,7 +26,7 @@ export function buildCompactDisplayPrompt(
     return multi.body ? `${tag} ${multi.body}` : tag;
   }
 
-  const routed = prepareDispatchLine(line, knownAgents, readOnlyPending, focusAgent);
+  const routed = prepareDispatchLine(line, knownAgents, readOnlyPending, defaultAgent);
   if (!routed) return trimmed;
   const parsed = parseLine(routed);
   if (parsed.kind === "agent") {
@@ -41,9 +41,9 @@ export function displayPromptFromDispatch(
   compactLine: string,
   routedExpanded: string,
   knownAgents: string[],
-  focusAgent: string | null,
+  defaultAgent: string | null,
 ): string {
-  const compact = buildCompactDisplayPrompt(compactLine, knownAgents, focusAgent);
+  const compact = buildCompactDisplayPrompt(compactLine, knownAgents, defaultAgent);
   const parsed = parseLine(routedExpanded);
   if (parsed.kind !== "agent") return compact;
   const mergedBody = parsed.content.trim();

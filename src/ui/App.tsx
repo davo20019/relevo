@@ -35,6 +35,7 @@ import os from "node:os";
 import {
   ALL_TOKEN,
   expandAll,
+  parseAfterCommand,
   parseLine,
   parseMulti,
   prepareDispatchLine,
@@ -50,22 +51,33 @@ import {
   streamToRun,
   cancelRuns,
   captureDirSession,
+  elapsedSeconds,
   type AgentRunState,
 } from "../run.js";
-import { classifySubmit, formatQueuePreview } from "../queue.js";
+import {
+  classifySubmit,
+  dependencySatisfied,
+  formatQueuePreview,
+  pruneDeliveredBatches,
+  queuedLines,
+  recordCompletedRunKey,
+  resolveAfterTarget,
+  shouldDisablePromptInput,
+  type PromptQueueBatch,
+} from "../queue.js";
 import { appendPromptHistory, loadPromptHistory } from "../prompt-history.js";
 import {
-  focusClearMessage,
-  focusSetMessage,
-  formatFocusStatus,
-  loadPersistedFocus,
+  defaultClearMessage,
+  defaultSetMessage,
+  formatDefaultStatus,
+  loadPersistedDefault,
   loadGlobalSettings,
   loadProjectSettings,
-  parseFocusCommand,
-  resolveEffectiveFocus,
-  saveGlobalFocusAgent,
-  saveProjectFocusAgent,
-  type PersistedFocus,
+  parseDefaultCommand,
+  resolveEffectiveDefault,
+  saveGlobalDefaultAgent,
+  saveProjectDefaultAgent,
+  type PersistedDefault,
 } from "../settings.js";
 import { BottomToolbar } from "./BottomToolbar.js";
 import { MultilineInput } from "./MultilineInput.js";
@@ -142,8 +154,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const inputRef = useRef(input);
   inputRef.current = input;
   const lastCtrlCRef = useRef(0);
-  const [sessionFocusOverride, setSessionFocusOverride] = useState<string | null>(null);
-  const [persistedFocus, setPersistedFocus] = useState<PersistedFocus>(() => loadPersistedFocus());
+  const [sessionDefaultOverride, setSessionDefaultOverride] = useState<string | null>(null);
+  const [persistedDefault, setPersistedDefault] = useState<PersistedDefault>(() => loadPersistedDefault());
   // Submitted-prompt history for the input's Up/Down recall. Loaded once from
   // disk on mount; appended whenever a non-empty line is submitted.
   const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory());
@@ -155,13 +167,21 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   // what triggers re-renders / effects.
   const [inFlight, setInFlight] = useState<Set<string>>(() => new Set());
   const inFlightRef = useRef<Set<string>>(new Set());
-  const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
-  // Queue holds a pre-resolved per-agent dispatch plan plus the set of agents
-  // that have already received it. Drain visits each target as it idles and
-  // stops re-firing once it's in `delivered`. Cleared when every target has
-  // been served. Pre-resolution at queue time means image attachments and
-  // pendingPrompt fold-ins are captured against the state at submission, not
-  // re-derived later when state may have shifted.
+  const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
+  const [queueVersion, setQueueVersion] = useState(0);
+  // Synchronous counter for "a queue-branch submission is mid-flight." Set
+  // before any await inside the queue branch so a second submit's
+  // classifySubmit observes the in-progress work even if React hasn't
+  // re-rendered the new `preparing` state yet. Without it, a queued submit
+  // whose awaits straddle the moment the last in-flight agent finishes would
+  // see busy=false on the next submit and take the immediate-dispatch path,
+  // racing the first submission.
+  const queueBranchActiveRef = useRef(0);
+  // Queue holds pre-resolved per-agent dispatch plans plus the set of agents
+  // that have already received each plan. Drain visits each target as it idles
+  // and stops re-firing once it's in `delivered`. Pre-resolution at queue time
+  // means image attachments and pendingPrompt fold-ins are captured against the
+  // state at submission, not re-derived later when state may have shifted.
   type QueuedItem = {
     agent: string;
     cleaned: string;
@@ -169,12 +189,23 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     imagePaths: string[];
     displayPrompt: string;
     spec: AgentSpec;
+    dependsOn?: { agent: string; runId: string };
   };
-  const queuedRef = useRef<{
-    line: string;
-    items: QueuedItem[];
-    delivered: Set<string>;
-  } | null>(null);
+  const queuedRef = useRef<PromptQueueBatch<QueuedItem>[]>([]);
+  // Tracks every run that has reached any terminal state, keyed by
+  // `${agentName}:${run.id}`. The drain loop consults this when an item has a
+  // `dependsOn` (set by `/after`) to know whether the upstream run is finished.
+  // Bounded to 256 entries via a parallel order list so a long session can't
+  // grow this unboundedly.
+  const completedRunKeysRef = useRef<Set<string>>(new Set());
+  const completedRunOrderRef = useRef<string[]>([]);
+  const recordCompletedRun = useCallback((agent: string, runId: string) => {
+    recordCompletedRunKey(
+      completedRunKeysRef.current,
+      completedRunOrderRef.current,
+      `${agent}:${runId}`,
+    );
+  }, []);
   // True while handleSubmit is in its synchronous parse/setup window before
   // any agent has been marked in-flight. Without this gate, a second submit
   // in the same tick could race past classifySubmit because busy is still
@@ -199,7 +230,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     },
     [setInFlightFromRef],
   );
-  const busy = inFlight.size > 0 || preparing;
+  const refreshQueuedPreview = useCallback(() => {
+    setQueuedPreview(queuedLines(queuedRef.current));
+    setQueueVersion((v) => v + 1);
+  }, []);
 
   const sessionStateRef = useRef({
     lastAgent: null as string | null,
@@ -209,22 +243,25 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     pendingImages: [] as string[],
     pendingPrompt: null as string | null,
   });
-  const activeProcsRef = useRef<Array<ReturnType<typeof spawnProc>>>([]);
+  const activeProcsRef = useRef<
+    Array<{ agent: string; spawn: ReturnType<typeof spawnProc> }>
+  >([]);
   const autoRenameCandidateRef = useRef<string | null>(null);
   const migrationNoticeShownRef = useRef(false);
 
   const agents = useMemo(() => Object.keys(config.agents), [config]);
   const availableAgents = useMemo(() => availableAgentNames(config.agents), [config.agents]);
   const readyCount = availableAgents.length;
-  const focusAgent = useMemo(
-    () => resolveEffectiveFocus(sessionFocusOverride, persistedFocus, availableAgents),
-    [sessionFocusOverride, persistedFocus, availableAgents],
+  const defaultAgent = useMemo(
+    () => resolveEffectiveDefault(sessionDefaultOverride, persistedDefault, availableAgents),
+    [sessionDefaultOverride, persistedDefault, availableAgents],
   );
   const agentColor = useMemo(() => {
     const m: Record<string, string> = {};
     agents.forEach((n, i) => (m[n] = AGENT_COLORS[i % AGENT_COLORS.length]!));
     return m;
   }, [agents]);
+  const liveAgentsSet = useMemo(() => new Set(availableAgents), [availableAgents]);
 
   useEffect(() => {
     if (activeRuns.length === 0) return;
@@ -293,13 +330,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     // both in one keystroke matches the "abort everything" mental model;
     // letting Esc leave a queued prompt around would surprise the user the
     // moment the cancel completes and the queue immediately dispatches.
-    if (queuedRef.current !== null) {
-      queuedRef.current = null;
-      setQueuedPrompt(null);
+    if (queuedRef.current.length > 0) {
+      queuedRef.current = [];
+      refreshQueuedPreview();
     }
     if (activeRuns.length > 0) {
       const procs = activeProcsRef.current
-        .map((r) => (r && "proc" in r ? r.proc : null))
+        .map((r) => (r.spawn && "proc" in r.spawn ? r.spawn.proc : null))
         .filter((p): p is NonNullable<typeof p> => Boolean(p));
       cancelRuns(activeRuns, procs);
     }
@@ -338,95 +375,119 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       userPrompt: string,
       fullPrompt: string,
       displayPrompt: string,
+      background?: boolean,
     ) => {
+      // Default rule: a dispatch is background iff something else is already
+      // in flight. Callers may pre-compute and pass an explicit value when
+      // the agent has already been added to inFlight by the caller (e.g. the
+      // queue drain) so the "is self in the set?" question can't be answered
+      // by counting here.
+      const bg = background ?? inFlightRef.current.size > 0;
       const run = newRun(
         agentName,
         agentColor[agentName] ?? "cyan",
         displayPrompt,
         computeLiveMaxLines(),
+        bg,
       );
       markInFlight(agentName);
       setActiveRuns((prev) => [...prev, run]);
-      const prep = await prepareCommand(agentName, spec, fullPrompt);
-      const spawned = spawnProc(prep.args, prep.viaStdin, fullPrompt);
-      if (spawned.error) {
-        log(spawned.error, "error");
-        setActiveRuns((prev) => prev.filter((r) => r !== run));
-        clearInFlight(agentName);
-        return null;
-      }
-      const proc = spawned.proc!;
-      activeProcsRef.current = [...activeProcsRef.current, spawned];
-      let activePrep = prep;
+      // Outer try/finally guarantees we always remove `run` from activeRuns
+      // and clear inFlight, even if prepareCommand, streamToRun, the recovery
+      // retry, or captureDirSession throws. Without this, a thrown error on
+      // any of those paths leaves the run "live" in the UI forever and pins
+      // activeRunCountRef > 0, blocking the deferred-resize flow.
       try {
-        const result = await streamToRun({
-          run,
-          proc,
-          parser: prep.parser,
-          agentName,
-          preGen: prep.preGen,
-          sessionId: prep.sessionId,
-          verbose: sessionStateRef.current.verbose,
-        });
-        const recoverable =
-          result.sessionInvalid &&
-          result.exitCode !== 0 &&
-          !run.cancelled &&
-          !run.interrupted &&
-          Boolean(spec.resume_template);
-        if (recoverable) {
-          await clearAgentSession(agentName);
-          const retryPrep = await prepareCommand(agentName, spec, fullPrompt);
-          const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
-          if (retrySpawned.error) {
-            log(`@${agentName} session expired and retry failed: ${retrySpawned.error}`, "error");
-          } else {
-            log(`@${agentName} ↻ session expired, retrying with a fresh session`, "warn");
-            resetRunForRetry(run, "");
-            activeProcsRef.current = activeProcsRef.current.map((p) =>
-              p === spawned ? retrySpawned : p,
-            );
-            activePrep = retryPrep;
-            await streamToRun({
-              run,
-              proc: retrySpawned.proc!,
-              parser: retryPrep.parser,
-              agentName,
-              preGen: retryPrep.preGen,
-              sessionId: retryPrep.sessionId,
-              verbose: sessionStateRef.current.verbose,
-            });
-          }
+        const prep = await prepareCommand(agentName, spec, fullPrompt);
+        const spawned = spawnProc(prep.args, prep.viaStdin, fullPrompt);
+        if (spawned.error) {
+          log(spawned.error, "error");
+          return null;
         }
+        const proc = spawned.proc!;
+        activeProcsRef.current = [
+          ...activeProcsRef.current,
+          { agent: agentName, spawn: spawned },
+        ];
+        let activePrep = prep;
+        try {
+          const result = await streamToRun({
+            run,
+            proc,
+            parser: prep.parser,
+            agentName,
+            preGen: prep.preGen,
+            sessionId: prep.sessionId,
+            verbose: sessionStateRef.current.verbose,
+          });
+          const recoverable =
+            result.sessionInvalid &&
+            result.exitCode !== 0 &&
+            !run.cancelled &&
+            !run.interrupted &&
+            Boolean(spec.resume_template);
+          if (recoverable) {
+            await clearAgentSession(agentName);
+            const retryPrep = await prepareCommand(agentName, spec, fullPrompt);
+            const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
+            if (retrySpawned.error) {
+              log(`@${agentName} session expired and retry failed: ${retrySpawned.error}`, "error");
+            } else {
+              log(`@${agentName} ↻ session expired, retrying with a fresh session`, "warn");
+              resetRunForRetry(run, "");
+              activeProcsRef.current = activeProcsRef.current.map((p) =>
+                p.spawn === spawned ? { ...p, spawn: retrySpawned } : p,
+              );
+              activePrep = retryPrep;
+              await streamToRun({
+                run,
+                proc: retrySpawned.proc!,
+                parser: retryPrep.parser,
+                agentName,
+                preGen: retryPrep.preGen,
+                sessionId: retryPrep.sessionId,
+                verbose: sessionStateRef.current.verbose,
+              });
+            }
+          }
+        } finally {
+          activeProcsRef.current = activeProcsRef.current.filter(
+            (p) =>
+              p.spawn !== spawned &&
+              (!("proc" in p.spawn) || p.spawn.proc !== proc),
+          );
+        }
+        if (!run.cancelled && !run.interrupted && run.finalStatus === "done") {
+          await captureDirSession(agentName, spec, activePrep.dirSnapshot);
+        }
+        sessionStateRef.current.lastAgent = agentName;
+        sessionStateRef.current.lastElapsed = (run.end! - run.start) / 1000;
+        sessionStateRef.current.lastStatus =
+          run.cancelled ? "cancelled" : run.interrupted ? "interrupted" : run.finalStatus ?? "?";
+
+        finalizeLivePreview(run, spec.parser);
+
+        const completed: CompletedTurn = {
+          id: nextId(),
+          prompt: displayPrompt,
+          runs: [run],
+          task: safeCurrentTask(),
+          at: new Date(run.start),
+        };
+        setHistory((h) => [...h, { kind: "turn", turn: completed }]);
+        if (run.cancelled || run.interrupted) return null;
+        return run.responseChunks.join("");
       } finally {
-        activeProcsRef.current = activeProcsRef.current.filter(
-          (p) => p !== spawned && (!("proc" in p) || p.proc !== proc),
-        );
+        setActiveRuns((prev) => prev.filter((r) => r !== run));
+        recordCompletedRun(agentName, run.id);
+        if (run.background) {
+          const elapsed = Math.floor(((run.end ?? Date.now()) - run.start) / 1000);
+          log(`@${agentName} background task done in ${elapsed}s`);
+        }
+        clearInFlight(agentName);
       }
-      if (!run.cancelled && !run.interrupted && run.finalStatus === "done") {
-        await captureDirSession(agentName, spec, activePrep.dirSnapshot);
-      }
-      sessionStateRef.current.lastAgent = agentName;
-      sessionStateRef.current.lastElapsed = (run.end! - run.start) / 1000;
-      sessionStateRef.current.lastStatus =
-        run.cancelled ? "cancelled" : run.interrupted ? "interrupted" : run.finalStatus ?? "?";
-
-      finalizeLivePreview(run, spec.parser);
-
-      const completed: CompletedTurn = {
-        id: nextId(),
-        prompt: displayPrompt,
-        runs: [run],
-        task: safeCurrentTask(),
-        at: new Date(),
-      };
-      setHistory((h) => [...h, { kind: "turn", turn: completed }]);
-      setActiveRuns((prev) => prev.filter((r) => r !== run));
-      clearInFlight(agentName);
-      if (run.cancelled || run.interrupted) return null;
-      return run.responseChunks.join("");
     },
-    [agentColor, clearInFlight, log, markInFlight],
+    [agentColor, clearInFlight, log, markInFlight, recordCompletedRun],
   );
 
   const dispatchParallel = useCallback(
@@ -437,11 +498,24 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       displayPrompt: string,
     ) => {
       const liveMax = computeLiveMaxLines();
-      const runs = agentNames.map((n) => newRun(n, agentColor[n] ?? "cyan", displayPrompt, liveMax));
+      // First prepared entry is foreground; the rest of the batch is
+      // background. If another agent is already running before the batch
+      // starts, every entry (including the first) is background.
+      const priorInFlight = inFlightRef.current.size > 0;
+      const runs = agentNames.map((n, i) =>
+        newRun(n, agentColor[n] ?? "cyan", displayPrompt, liveMax, priorInFlight || i > 0),
+      );
       for (const n of agentNames) inFlightRef.current.add(n);
       setInFlightFromRef();
       setActiveRuns((prev) => [...prev, ...runs]);
 
+      // Outer try/finally guarantees the live runs are evicted and any still
+      // in-flight agents cleared, even if prepareCommand/streamToRun/the
+      // recovery retry/captureDirSession throws somewhere mid-batch. The
+      // inner per-agent finally already clears each agent's inFlight; this
+      // outer finally is a safety net for the post-batch captureDirSession
+      // loop and any other paths that come after.
+      try {
       const prepared = await Promise.all(
         agentNames.map(async (name, i) => {
           const spec = config.agents[name]!;
@@ -452,7 +526,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }),
       );
 
-      activeProcsRef.current = [...activeProcsRef.current, ...prepared.map((p) => p.spawned)];
+      activeProcsRef.current = [
+        ...activeProcsRef.current,
+        ...prepared.map((p) => ({ agent: p.name, spawn: p.spawned })),
+      ];
 
       await Promise.all(
         prepared.map(async (p) => {
@@ -493,7 +570,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             p.spawned = retrySpawned;
             p.prep = retryPrep;
             activeProcsRef.current = activeProcsRef.current.map((sp) =>
-              sp === originalSpawned ? retrySpawned : sp,
+              sp.spawn === originalSpawned ? { ...sp, spawn: retrySpawned } : sp,
             );
             await streamToRun({
               run: p.run,
@@ -510,6 +587,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             // (we wait for siblings). The panel stays visible in activeRuns
             // until the whole batch commits below; clearInFlight just lets
             // the next queued prompt fire on this agent in the meantime.
+            // Record completion early too, so a queued /after on this run can drain
+            // immediately rather than waiting for the slowest sibling.
+            recordCompletedRun(p.name, p.run.id);
+            if (p.run.background) {
+              const elapsed = Math.floor(((p.run.end ?? Date.now()) - p.run.start) / 1000);
+              log(`@${p.name} background task done in ${elapsed}s`);
+            }
             clearInFlight(p.name);
           }
         }),
@@ -517,7 +601,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
       for (const p of prepared) finalizeLivePreview(p.run, p.spec.parser);
       const ourSpawns = new Set(prepared.map((p) => p.spawned));
-      activeProcsRef.current = activeProcsRef.current.filter((sp) => !ourSpawns.has(sp));
+      activeProcsRef.current = activeProcsRef.current.filter(
+        (sp) => !ourSpawns.has(sp.spawn),
+      );
 
       for (const p of prepared) {
         if (
@@ -544,12 +630,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       sessionStateRef.current.lastStatus =
         okCount === total ? `✓×${okCount}` : `${okCount}/${total} ok`;
 
+      // Mutate before the turn is committed: Ink's <Static> caches the
+      // rendered tree once, so a later mutation wouldn't show up. Each
       const completed: CompletedTurn = {
         id: nextId(),
         prompt: displayPrompt,
         runs,
         task: safeCurrentTask(),
-        at: new Date(),
+        at: new Date(runs[0]!.start),
       };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
       const ourRuns = new Set(runs);
@@ -560,25 +648,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           await appendTurn(p.name, userPrompt, p.run.responseChunks.join(""));
         }
       }
-
-      // One dim hint line for every agent in this fanout that completed cleanly
-      // AND has an open_template (i.e. is actually resumable). Mirrors the
-      // single-agent hint shape so the affordance discovery is consistent.
-      const openable = prepared
-        .filter(
-          (p) =>
-            !p.spawned.error &&
-            !p.run.cancelled &&
-            !p.run.interrupted &&
-            p.run.finalStatus === "done" &&
-            Boolean(p.spec.open_template),
-        )
-        .map((p) => `/open ${p.name}`);
-      if (openable.length > 0) {
-        log(`resume in agent's own CLI (new window):  ${openable.join("  ·  ")}`);
+      } finally {
+        const ourRunsCleanup = new Set(runs);
+        setActiveRuns((prev) => prev.filter((r) => !ourRunsCleanup.has(r)));
+        for (const n of agentNames) inFlightRef.current.delete(n);
+        setInFlightFromRef();
       }
     },
-    [agentColor, clearInFlight, config.agents, log, setInFlightFromRef],
+    [agentColor, clearInFlight, config.agents, log, recordCompletedRun, setInFlightFromRef],
   );
 
   const resetVisibleTaskState = useCallback((message: string): void => {
@@ -705,6 +782,34 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         log(`cleared transcripts and sessions for task ${safeCurrentTask()}`);
         return true;
       }
+      if (trimmed === "/cancel" || trimmed.startsWith("/cancel ")) {
+        const m = trimmed.match(/^\/cancel\s+@?([A-Za-z0-9_\-]+)\s*$/);
+        if (!m) {
+          log("usage: /cancel @<agent>  (Esc still cancels every active run)", "warn");
+          return true;
+        }
+        const name = m[1]!;
+        if (!config.agents[name]) {
+          log(`unknown agent: @${name} (try /agents)`, "error");
+          return true;
+        }
+        const matchingProcs = activeProcsRef.current
+          .filter((entry) => entry.agent === name)
+          .map((entry) =>
+            entry.spawn && "proc" in entry.spawn ? entry.spawn.proc : null,
+          )
+          .filter((p): p is NonNullable<typeof p> => Boolean(p));
+        const matchingRuns = activeRuns.filter(
+          (r) => r.agentName === name && r.running,
+        );
+        if (matchingRuns.length === 0 && matchingProcs.length === 0) {
+          log(`no active @${name} run`);
+          return true;
+        }
+        cancelRuns(matchingRuns, matchingProcs);
+        log(`cancelled @${name} (${matchingRuns.length} run(s))`);
+        return true;
+      }
       if (trimmed === "/reset") {
         if (!getActiveTask()) {
           log("no active task yet. type a prompt to start one.", "warn");
@@ -731,8 +836,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         await handleOpenCommand(rest);
         return true;
       }
-      const focusCmd = parseFocusCommand(trimmed);
-      if (focusCmd) {
+      const defaultCmd = parseDefaultCommand(trimmed);
+      if (defaultCmd) {
         const assertAgent = (name: string): boolean => {
           if (!config.agents[name]) {
             log(`unknown agent: @${name} (try /agents)`, "error");
@@ -743,55 +848,97 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           }
           return true;
         };
-        if (focusCmd.kind === "show") {
-          const globalAgent = loadGlobalSettings().focus_agent ?? null;
-          const localAgent = loadProjectSettings().focus_agent ?? null;
+        if (defaultCmd.kind === "show") {
+          const globalAgent = loadGlobalSettings().default_agent ?? null;
+          const localAgent = loadProjectSettings().default_agent ?? null;
           log(
-            formatFocusStatus({
-              effective: focusAgent,
-              sessionOverride: sessionFocusOverride,
+            formatDefaultStatus({
+              effective: defaultAgent,
+              sessionOverride: sessionDefaultOverride,
               globalAgent,
               localAgent,
             }),
           );
           return true;
         }
-        if (focusCmd.kind === "clear") {
-          if (focusCmd.scope === "session") {
-            setSessionFocusOverride(null);
-            log(focusClearMessage("session"));
+        if (defaultCmd.kind === "clear") {
+          if (defaultCmd.scope === "session") {
+            setSessionDefaultOverride(null);
+            log(defaultClearMessage("session"));
             return true;
           }
-          if (focusCmd.scope === "global") {
-            saveGlobalFocusAgent(null);
-            setPersistedFocus(loadPersistedFocus());
-            setSessionFocusOverride(null);
-            log(focusClearMessage("global"));
+          if (defaultCmd.scope === "global") {
+            saveGlobalDefaultAgent(null);
+            setPersistedDefault(loadPersistedDefault());
+            setSessionDefaultOverride(null);
+            log(defaultClearMessage("global"));
             return true;
           }
-          saveProjectFocusAgent(null);
-          setPersistedFocus(loadPersistedFocus());
-          setSessionFocusOverride(null);
-          log(focusClearMessage("local"));
+          saveProjectDefaultAgent(null);
+          setPersistedDefault(loadPersistedDefault());
+          setSessionDefaultOverride(null);
+          log(defaultClearMessage("local"));
           return true;
         }
-        if (!assertAgent(focusCmd.agent)) return true;
-        if (focusCmd.scope === "session") {
-          setSessionFocusOverride(focusCmd.agent);
-          log(focusSetMessage("session", focusCmd.agent));
+        if (!assertAgent(defaultCmd.agent)) return true;
+        if (defaultCmd.scope === "session") {
+          setSessionDefaultOverride(defaultCmd.agent);
+          log(defaultSetMessage("session", defaultCmd.agent));
           return true;
         }
-        if (focusCmd.scope === "global") {
-          saveGlobalFocusAgent(focusCmd.agent);
-          setPersistedFocus(loadPersistedFocus());
-          setSessionFocusOverride(null);
-          log(focusSetMessage("global", focusCmd.agent));
+        if (defaultCmd.scope === "global") {
+          saveGlobalDefaultAgent(defaultCmd.agent);
+          setPersistedDefault(loadPersistedDefault());
+          setSessionDefaultOverride(null);
+          log(defaultSetMessage("global", defaultCmd.agent));
           return true;
         }
-        saveProjectFocusAgent(focusCmd.agent);
-        setPersistedFocus(loadPersistedFocus());
-        setSessionFocusOverride(null);
-        log(focusSetMessage("local", focusCmd.agent));
+        saveProjectDefaultAgent(defaultCmd.agent);
+        setPersistedDefault(loadPersistedDefault());
+        setSessionDefaultOverride(null);
+        log(defaultSetMessage("local", defaultCmd.agent));
+        return true;
+      }
+      if (trimmed === "/after" || trimmed.startsWith("/after ")) {
+        const parsed = parseAfterCommand(trimmed);
+        if (!parsed) {
+          log("usage: /after @<agent>: <prompt>", "warn");
+          return true;
+        }
+        const { targetAgent, body } = parsed;
+        if (!config.agents[targetAgent]) {
+          log(`unknown agent: @${targetAgent} (try /agents)`, "error");
+          return true;
+        }
+        const target = resolveAfterTarget(
+          targetAgent,
+          activeRuns,
+          completedRunOrderRef.current,
+        );
+        if (target === null) {
+          log(`no running or recent @${targetAgent} run to wait for`, "warn");
+          return true;
+        }
+        const runId = target.runId;
+        if (target.ambiguous) {
+          const n = activeRuns.filter(
+            (r) => r.agentName === targetAgent && r.running,
+          ).length;
+          log(
+            `@${targetAgent} has ${n} in-flight runs; waiting on the most recent`,
+          );
+        }
+        const items = await parseLineToItems(body, body, [], null);
+        if (items === null || items.length === 0) return true;
+        const dep = { agent: targetAgent, runId };
+        const itemsWithDep = items.map((it) => ({ ...it, dependsOn: dep }));
+        queuedRef.current.push({
+          line: trimmed,
+          items: itemsWithDep,
+          delivered: new Set(),
+        });
+        refreshQueuedPreview();
+        log(`queued after @${targetAgent}: ${body}`);
         return true;
       }
       if (trimmed === "/sync" || trimmed.startsWith("/sync ")) {
@@ -1094,7 +1241,19 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           log("usage: /image <path> | /image paste | /image list | /image clear");
       }
     },
-    [availableAgents, config, focusAgent, log, resetVisibleTaskState, sessionFocusOverride],
+    // Note: parseLineToItems is declared after handleSlash; we deliberately
+    // rely on closure capture rather than adding it as a dep (a forward
+    // reference in the deps array would TDZ at first render).
+    [
+      activeRuns,
+      availableAgents,
+      config,
+      defaultAgent,
+      log,
+      refreshQueuedPreview,
+      resetVisibleTaskState,
+      sessionDefaultOverride,
+    ],
   );
 
   // Dispatch a single pre-resolved queued item. Mirrors the single-agent tail
@@ -1102,7 +1261,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   // transcripts → dispatchSingle → appendTurn. Drained per-agent so each
   // queued target fires the instant its agent idles, regardless of siblings.
   const dispatchQueuedItem = useCallback(
-    async (item: QueuedItem) => {
+    async (item: QueuedItem, background: boolean) => {
       try {
         await ensureActiveTask();
         const userPrompt = formatPromptForAgentImages(item.agent, item.cleaned, item.imagePaths);
@@ -1118,29 +1277,48 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           userPrompt,
           fullPrompt,
           item.displayPrompt,
+          background,
         );
         if (response !== null) {
           await appendTurn(item.agent, userPrompt, response);
-          if (item.spec.open_template && sessionStateRef.current.lastStatus === "done") {
-            log(`/open ${item.agent} to resume in ${item.agent}'s own CLI (new window)`);
-          }
         }
       } catch (e: any) {
+        clearInFlight(item.agent);
         log(`@${item.agent} queued dispatch failed: ${e?.message ?? e}`, "error");
       }
     },
-    [config.agents, config.context_turns, dispatchSingle, ensureActiveTask, log, maybeAutoRenameProvisional],
+    [
+      clearInFlight,
+      config.agents,
+      config.context_turns,
+      dispatchSingle,
+      ensureActiveTask,
+      log,
+      maybeAutoRenameProvisional,
+    ],
   );
 
   // Parse a line into per-agent dispatch items. Same routing/multi/@all
   // semantics as the main dispatch path; centralized here so the queue stores
-  // a stable plan (image paths pinned into the prompt, pendingPrompt
-  // folded, agent list pinned) and the drain doesn't have to re-derive.
+  // a stable plan (image paths pinned into the prompt, pendingPrompt folded,
+  // agent list pinned) and the drain doesn't have to re-derive.
+  //
+  // Image / pending-prompt ownership is passed in by the caller rather than
+  // read from sessionStateRef so two queue-branch submissions racing through
+  // their own awaits can't observe each other's mid-flight mutations. The
+  // caller transfers ownership synchronously before any await; this function
+  // operates on the transferred snapshot only.
+  //
   // Returns null when nothing dispatchable (already logged the reason).
   const parseLineToItems = useCallback(
-    async (compactLine: string, expandedLine: string): Promise<QueuedItem[] | null> => {
+    async (
+      compactLine: string,
+      expandedLine: string,
+      ownedImages: string[],
+      ownedPrompt: string | null,
+    ): Promise<QueuedItem[] | null> => {
       let expanded = expandedLine;
-      const state = sessionStateRef.current;
+      let carriedPrompt = ownedPrompt;
       if (ALL_TOKEN.test(expandedLine.trimStart())) {
         const available = availableAgentNames(config.agents);
         const unavail = unavailableAgentReasons(config.agents);
@@ -1152,10 +1330,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }
         const allBody = expandedLine.trimStart().replace(ALL_TOKEN, "").trim();
         let lineForExpand = expandedLine;
-        if (!allBody && state.pendingPrompt) {
-          lineForExpand = `@all ${state.pendingPrompt}`;
+        if (!allBody && carriedPrompt) {
+          lineForExpand = `@all ${carriedPrompt}`;
         }
-        state.pendingPrompt = null;
+        carriedPrompt = null;
         expanded = expandAll(lineForExpand, available);
       } else {
         expanded = expandAll(expandedLine, agents);
@@ -1164,7 +1342,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       const multi = parseMulti(expanded, agents);
       if (multi && multi.body) {
         const { images: extracted, cleaned } = extractImagePaths(multi.body);
-        let allImages = [...state.pendingImages, ...extracted];
+        let allImages = [...ownedImages, ...extracted];
         if (allImages.length) {
           try {
             allImages = await stageImagePaths(allImages);
@@ -1176,8 +1354,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             `attaching ${allImages.length} image(s) to ${multi.agents.map((a) => "@" + a).join(", ")}`,
           );
         }
-        state.pendingImages = [];
-        const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, focusAgent);
+        const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, defaultAgent);
         return multi.agents
           .filter((a) => config.agents[a] && agentIsEnabled(config.agents[a]!))
           .map((a) => ({
@@ -1196,20 +1373,24 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
       const routingState = {
         get pendingPrompt() {
-          return state.pendingPrompt;
+          return carriedPrompt;
         },
         set pendingPrompt(v: string | null) {
-          state.pendingPrompt = v;
+          carriedPrompt = v;
         },
       };
-      const routed = prepareDispatchLine(expanded, agents, routingState, focusAgent);
+      const routed = prepareDispatchLine(expanded, agents, routingState, defaultAgent);
       if (routed === null) {
         const choices = agents.map((n) => "@" + n).join(" ");
-        const suffix = state.pendingPrompt ? " Type one of those tags to send it." : "";
+        const suffix = carriedPrompt ? " Type one of those tags to send it." : "";
         log(
-          `no agent tagged. Pick one: ${choices}.${suffix} Use /focus <agent> for a default.`,
+          `no agent tagged. Pick one: ${choices}.${suffix} Use /default <agent> for a default.`,
           "warn",
         );
+        // The user typed a bare prompt with no agent; remember it so the next
+        // @<agent> submit folds it in. Restore the carried prompt back into
+        // session state — ownership transfer is reversed only on this path.
+        if (carriedPrompt !== null) sessionStateRef.current.pendingPrompt = carriedPrompt;
         return null;
       }
       const parsed = parseLine(routed);
@@ -1234,7 +1415,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         return null;
       }
       const { images: extracted, cleaned } = extractImagePaths(parsed.content);
-      let allImages = [...state.pendingImages, ...extracted];
+      let allImages = [...ownedImages, ...extracted];
       if (!cleaned.trim() && allImages.length === 0) {
         log("empty prompt");
         return null;
@@ -1248,12 +1429,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }
         log(`attaching ${allImages.length} image(s) to @${agent}`);
       }
-      state.pendingImages = [];
       const displayPrompt = displayPromptFromDispatch(
         compactLine,
         routed,
         agents,
-        focusAgent,
+        defaultAgent,
       );
       return [
         {
@@ -1266,11 +1446,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         },
       ];
     },
-    [agents, config.agents, ensureActiveTask, focusAgent, log, pushSkipped],
+    [agents, config.agents, defaultAgent, log, pushSkipped],
   );
 
   const handleSubmit = useCallback(
     async (compactLine: string, expandedLine: string) => {
+      try {
       if (!compactLine.trim()) {
         setInput("");
         return;
@@ -1282,7 +1463,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         prev[prev.length - 1] === compactLine ? prev : [...prev, compactLine],
       );
       appendPromptHistory(compactLine);
-      const decision = classifySubmit(expandedLine, busy);
+      const decision = classifySubmit(
+        expandedLine,
+        inFlightRef.current.size > 0 || preparing || queueBranchActiveRef.current > 0,
+      );
       if (decision === "reject-slash") {
         log(
           "can't run a slash command while a dispatch is in flight. press Esc to cancel the run first.",
@@ -1292,22 +1476,33 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       }
       if (decision === "queue") {
         setInput("");
+        // Synchronously take ownership of pendingImages/pendingPrompt and mark
+        // this queue branch active before any await — two concurrent queue
+        // submits must not race on the shared sessionStateRef.pendingImages
+        // bucket, and a third submit landing during our awaits must observe
+        // queueBranchActiveRef and route to "queue" too.
+        queueBranchActiveRef.current++;
         const state = sessionStateRef.current;
-        if (state.pendingImages.length > 0 || IMAGE_TOKEN.test(expandedLine)) {
-          await ensureActiveTask();
-          if (state.pendingImages.length > 0) {
-            try {
-              state.pendingImages = await stageImagePaths(state.pendingImages);
-            } catch (e: any) {
-              log(`could not copy queued image: ${e?.message ?? e}`, "error");
-              return;
-            }
+        const ownedImages = state.pendingImages;
+        state.pendingImages = [];
+        const ownedPrompt = state.pendingPrompt;
+        state.pendingPrompt = null;
+        try {
+          if (ownedImages.length > 0 || IMAGE_TOKEN.test(expandedLine)) {
+            await ensureActiveTask();
           }
+          const items = await parseLineToItems(
+            compactLine,
+            expandedLine,
+            ownedImages,
+            ownedPrompt,
+          );
+          if (items === null || items.length === 0) return;
+          queuedRef.current.push({ line: compactLine, items, delivered: new Set() });
+          refreshQueuedPreview();
+        } finally {
+          queueBranchActiveRef.current--;
         }
-        const items = await parseLineToItems(compactLine, expandedLine);
-        if (items === null || items.length === 0) return;
-        queuedRef.current = { line: compactLine, items, delivered: new Set() };
-        setQueuedPrompt(compactLine);
         return;
       }
       setInput("");
@@ -1381,7 +1576,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             });
             perAgent[name] = ctx ? ctx + userPrompt : userPrompt;
           }
-          const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, focusAgent);
+          const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, defaultAgent);
           await dispatchParallel(multi.agents, userPrompt, perAgent, displayPrompt);
           state.pendingImages = [];
           return;
@@ -1399,12 +1594,12 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             state.pendingPrompt = v;
           },
         };
-        const routed = prepareDispatchLine(expanded, agents, routingState, focusAgent);
+        const routed = prepareDispatchLine(expanded, agents, routingState, defaultAgent);
         if (routed === null) {
           const choices = agents.map((n) => "@" + n).join(" ");
           const suffix = state.pendingPrompt ? " Type one of those tags to send it." : "";
           log(
-            `no agent tagged. Pick one: ${choices}.${suffix} Use /focus <agent> for a default.`,
+            `no agent tagged. Pick one: ${choices}.${suffix} Use /default <agent> for a default.`,
             "warn",
           );
           return;
@@ -1475,7 +1670,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           compactLine,
           routed,
           agents,
-          focusAgent,
+          defaultAgent,
         );
         const response = await dispatchSingle(
           agent,
@@ -1487,20 +1682,23 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         state.pendingImages = [];
         if (response !== null) {
           await appendTurn(agent, userPrompt, response);
-          const spec = config.agents[agent]!;
-          if (spec.open_template && sessionStateRef.current.lastStatus === "done") {
-            log(`/open ${agent} to resume in ${agent}'s own CLI (new window)`);
-          }
         }
       } finally {
         setPreparing(false);
       }
+      } catch (e: any) {
+        // Last-resort guard: dispatchSingle / dispatchParallel are now
+        // self-healing on internal throws (activeRuns + inFlight cleaned via
+        // their outer try/finally) but a thrown error still propagates here.
+        // Without this catch the rejection escapes to React's async boundary
+        // and bubbles up as an unhandled promise rejection / TUI crash.
+        log(`dispatch failed: ${e?.message ?? e}`, "error");
+      }
     },
     [
       agents,
-      busy,
       config,
-      focusAgent,
+      defaultAgent,
       dispatchParallel,
       dispatchSingle,
       ensureActiveTask,
@@ -1509,37 +1707,49 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       log,
       maybeAutoRenameProvisional,
       parseLineToItems,
+      preparing,
       pushSkipped,
+      refreshQueuedPreview,
     ],
   );
 
-  // Drain the queue per-agent. Fires on every inFlight transition (and on
-  // queuedPrompt change so a fresh queue is considered immediately). For each
-  // target item, if its agent isn't already delivered or in flight, mark it
-  // delivered synchronously (before awaiting the async dispatch) so a second
-  // effect run on the same tick can't double-dispatch. Clears the queue once
-  // every target has been served.
+  // Drain queued batches per-agent. A fresh queueVersion considers new input
+  // immediately; inFlight changes let waiting same-agent items advance as runs
+  // finish. Mark in-flight before kicking off async dispatch so queued work is
+  // observable before dispatchQueuedItem reaches its own awaits.
   useEffect(() => {
-    const q = queuedRef.current;
-    if (q === null) return;
-    for (const item of q.items) {
-      if (q.delivered.has(item.agent)) continue;
-      if (inFlightRef.current.has(item.agent)) continue;
-      q.delivered.add(item.agent);
-      void dispatchQueuedItem(item);
+    let changed = false;
+    for (const q of queuedRef.current) {
+      for (const item of q.items) {
+        if (q.delivered.has(item.agent)) continue;
+        // `continue` (not `break`) so unrelated agents in the same batch can
+        // still drain when only one item is blocked on a dependency.
+        if (!dependencySatisfied(item.dependsOn, completedRunKeysRef.current)) continue;
+        if (inFlightRef.current.has(item.agent)) continue;
+        markInFlight(item.agent);
+        q.delivered.add(item.agent);
+        changed = true;
+        // After markInFlight the set contains this agent. >1 means another
+        // dispatch is still running alongside us — treat this as background.
+        // A queued item dispatched after every parent has finished (set size
+        // exactly 1, just us) is foreground.
+        const background = inFlightRef.current.size > 1;
+        void dispatchQueuedItem(item, background);
+      }
     }
-    if (q.delivered.size >= q.items.length) {
-      queuedRef.current = null;
-      setQueuedPrompt(null);
+    const before = queuedRef.current.length;
+    pruneDeliveredBatches(queuedRef.current);
+    if (changed || queuedRef.current.length !== before) {
+      refreshQueuedPreview();
     }
-  }, [inFlight, queuedPrompt, dispatchQueuedItem]);
+  }, [inFlight, queueVersion, dispatchQueuedItem, markInFlight, refreshQueuedPreview]);
 
   const toolbarState = {
     lastAgent: sessionStateRef.current.lastAgent,
     lastStatus: sessionStateRef.current.lastStatus,
     lastElapsed: sessionStateRef.current.lastElapsed,
     verbose: sessionStateRef.current.verbose,
-    focusAgent,
+    defaultAgent,
     readyCount,
     offCount: Math.max(0, agents.length - readyCount),
     runningCount: inFlight.size,
@@ -1557,7 +1767,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             const segments =
               item.line.level === "raw"
                 ? [{ text: item.line.text }]
-                : colorizeAgentMentions(item.line.text, agentColor);
+                : colorizeAgentMentions(item.line.text, agentColor, liveAgentsSet);
             return (
               <Text key={item.line.id} color={style.color} dimColor={style.dim}>
                 {segments.map((seg, i) =>
@@ -1623,26 +1833,70 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             groups.push({ prompt: r.prompt, runs: [r] });
           }
         }
-        return groups.map((g, i) => (
-          <Box key={`live-group-${i}`} flexDirection="column">
-            <UserPrompt prompt={g.prompt} cols={cols} />
-            <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} cols={cols} />
-          </Box>
-        ));
+        // Render a separator above each live group so the timestamp/task
+        // marker appears the moment the prompt is dispatched, not only when
+        // the run finishes and commits to history.
+        let lastCommittedTurn: CompletedTurn | null = null;
+        for (let i = history.length - 1; i >= 0; i--) {
+          const it = history[i];
+          if (it && it.kind === "turn") {
+            lastCommittedTurn = it.turn;
+            break;
+          }
+        }
+        const currentTask = safeCurrentTask();
+        return groups.map((g, i) => {
+          const startMs = g.runs[0]!.start;
+          const prevTask =
+            i === 0 ? lastCommittedTurn?.task ?? null : currentTask;
+          const sepKind: "none" | "single" | "double" =
+            i === 0 && !lastCommittedTurn
+              ? "none"
+              : prevTask !== currentTask
+                ? "double"
+                : "single";
+          const label = formatClockLabel({ at: new Date(startMs), task: currentTask });
+          return (
+            <Box key={`live-group-${i}`} flexDirection="column">
+              {sepKind !== "none" && (
+                <Separator kind={sepKind} label={label} cols={cols} />
+              )}
+              <UserPrompt prompt={g.prompt} cols={cols} />
+              <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} cols={cols} />
+            </Box>
+          );
+        });
       })()}
-      {queuedPrompt !== null && (
+      {queuedPreview.length > 0 && (
         <Box flexDirection="column">
           {(() => {
-            const prefix = "  queued: ";
-            const continuation = " ".repeat(prefix.length);
-            const suffix = "  (Esc to clear)";
-            const previewWidth = Math.max(1, cols - prefix.length - suffix.length);
-            const lines = formatQueuePreview(queuedPrompt, previewWidth);
-            return lines.map((line, i) => {
-              const isLast = i === lines.length - 1;
+            // Show every queued batch so the user can confirm rapid submits
+            // landed. The first batch gets a "queued:" prefix; later batches
+            // get a numbered marker. The hint about Esc only appears on the
+            // very last printed line of the very last batch.
+            const headPrefix = "  queued: ";
+            const continuation = " ".repeat(headPrefix.length);
+            const hint = "  (Esc to clear all)";
+            const previewWidth = Math.max(1, cols - headPrefix.length - hint.length);
+            const nodes: Array<{ key: string; text: string }> = [];
+            queuedPreview.forEach((line, batchIdx) => {
+              const isFirstBatch = batchIdx === 0;
+              const prefix = isFirstBatch
+                ? headPrefix
+                : `  ${String(batchIdx + 1).padStart(headPrefix.length - 4, " ")}. `;
+              const lines = formatQueuePreview(line, previewWidth);
+              lines.forEach((wrapped, lineIdx) => {
+                nodes.push({
+                  key: `${batchIdx}-${lineIdx}`,
+                  text: `${lineIdx === 0 ? prefix : continuation}${wrapped}`,
+                });
+              });
+            });
+            return nodes.map((n, i) => {
+              const isLast = i === nodes.length - 1;
               return (
-                <Text key={i} dimColor>
-                  {`${i === 0 ? prefix : continuation}${line}${isLast ? suffix : ""}`}
+                <Text key={n.key} dimColor>
+                  {`${n.text}${isLast ? hint : ""}`}
                 </Text>
               );
             });
@@ -1654,13 +1908,26 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           value={input}
           onChange={setInput}
           onSubmit={handleSubmit}
-          disabled={busy}
+          disabled={shouldDisablePromptInput(preparing, inFlight.size)}
           slashCommands={SLASH_COMMANDS}
           agents={agents}
           history={promptHistory}
         />
       </Box>
-      <BottomToolbar state={toolbarState} cols={cols} />
+      <BottomToolbar
+        state={toolbarState}
+        cols={cols}
+        tick={tick}
+        colorMap={agentColor}
+        perAgentStatuses={availableAgents.map((agent) => {
+          const run = activeRuns.find((r) => r.agentName === agent && r.running);
+          return {
+            agent,
+            running: Boolean(run),
+            elapsedSeconds: run ? elapsedSeconds(run) : undefined,
+          };
+        })}
+      />
     </Box>
   );
 }

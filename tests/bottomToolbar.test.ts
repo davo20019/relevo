@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatAgentStatus } from "../src/ui/BottomToolbar.js";
+import {
+  bottomStatusJustifyContent,
+  formatAgentStatus,
+  formatToolbarRightRows,
+} from "../src/ui/BottomToolbar.js";
 
 describe("formatAgentStatus", () => {
   it("shows ready and off counts when idle", () => {
@@ -14,21 +18,45 @@ describe("formatAgentStatus", () => {
     expect(formatAgentStatus(4, 2, 1)).toBe("agents: 1 running · 3 idle · 2 off");
   });
 
-  it("can include focus in the toolbar state type", () => {
+  it("can include the default agent in the toolbar state type", () => {
     const state = {
       lastAgent: null,
       lastStatus: null,
       lastElapsed: 0,
       verbose: false,
-      focusAgent: "claude",
+      defaultAgent: "claude",
       readyCount: 2,
       offCount: 0,
       runningCount: 0,
     };
-    expect(state.focusAgent).toBe("claude");
+    expect(state.defaultAgent).toBe("claude");
   });
 
   it("omits idle when every ready agent is running", () => {
     expect(formatAgentStatus(3, 1, 3)).toBe("agents: 3 running · 1 off");
+  });
+
+  it("collapses agent chips and meta onto a single toolbar row", () => {
+    expect(
+      formatToolbarRightRows({
+        metaParts: ["verbose"],
+        agentStatusText: "@codex 4s · @claude",
+        aggregateText: "agents: 2 ready",
+      }),
+    ).toEqual(["@codex 4s · @claude  ·  verbose"]);
+  });
+
+  it("falls back to aggregate text when there are no chips", () => {
+    expect(
+      formatToolbarRightRows({
+        metaParts: [],
+        agentStatusText: null,
+        aggregateText: "agents: 2 ready",
+      }),
+    ).toEqual(["agents: 2 ready"]);
+  });
+
+  it("right-aligns the toolbar status row", () => {
+    expect(bottomStatusJustifyContent()).toBe("flex-end");
   });
 });
