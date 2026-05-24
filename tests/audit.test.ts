@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { auditabilityReason, auditableAgentNames, tokenMetrics } from "../src/audit.js";
+import {
+  auditabilityReason,
+  auditableAgentNames,
+  tokenMetrics,
+  numericVerdict,
+  providerQualifier,
+} from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
+import type { Offender } from "../src/audit.js";
 
 const specs: Record<string, AgentSpec> = {
   claude: { cmd: "claude {prompt}", parser: "claude-json", resume_template: "claude --resume {session_id} {prompt}" },
@@ -54,5 +61,39 @@ describe("auditabilityReason", () => {
 describe("auditableAgentNames", () => {
   it("returns only the three structured CLIs in the default-ish set", () => {
     expect(auditableAgentNames(specs, fakeWhich).sort()).toEqual(["claude", "codex", "cursor"]);
+  });
+});
+
+describe("numericVerdict", () => {
+  it("≥0.95 → excellent", () => {
+    expect(numericVerdict(0.95)).toBe("excellent");
+    expect(numericVerdict(0.99)).toBe("excellent");
+  });
+  it("0.80–0.9499 → ok", () => {
+    expect(numericVerdict(0.94)).toBe("ok");
+    expect(numericVerdict(0.80)).toBe("ok");
+  });
+  it("<0.80 → investigate", () => {
+    expect(numericVerdict(0.79)).toBe("investigate");
+    expect(numericVerdict(0)).toBe("investigate");
+  });
+});
+
+describe("providerQualifier", () => {
+  it("codex ≤50% with empty offender list → qualifier", () => {
+    expect(providerQualifier("codex", 0.33, [])).toBe("provider-typical for codex");
+  });
+  it("codex ≤50% with no-scanner sentinel → qualifier (v1 case)", () => {
+    expect(providerQualifier("codex", 0.33, "no-scanner")).toBe("provider-typical for codex");
+  });
+  it("codex ≤50% with offenders found → no qualifier", () => {
+    const off: Offender = { name: "x", file: "y", pattern: "z", effect: "e", patch: "p" };
+    expect(providerQualifier("codex", 0.33, [off])).toBeNull();
+  });
+  it("codex >50% → no qualifier", () => {
+    expect(providerQualifier("codex", 0.51, "no-scanner")).toBeNull();
+  });
+  it("claude at 33% → no qualifier (not codex)", () => {
+    expect(providerQualifier("claude", 0.33, [])).toBeNull();
   });
 });

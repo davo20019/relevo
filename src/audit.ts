@@ -74,3 +74,24 @@ export function auditableAgentNames(
     .filter(([name, spec]) => auditabilityReason(name, spec, whichFn) === null)
     .map(([name]) => name);
 }
+
+export function numericVerdict(pct: number): VerdictTier {
+  if (pct >= 0.95) return "excellent";
+  if (pct >= 0.80) return "ok";
+  return "investigate";
+}
+
+export function providerQualifier(
+  agentName: string,
+  pct: number,
+  scan: ScannerOutput,
+): string | null {
+  // "No offenders" = empty array OR the no-scanner sentinel. Both mean
+  // "no known config-level cause to flag", which is when the qualifier
+  // is meant to suppress the alarm for known-quirky providers.
+  const noOffenders = scan === "no-scanner" || scan.length === 0;
+  if (agentName === "codex" && pct <= 0.50 && noOffenders) {
+    return "provider-typical for codex";
+  }
+  return null;
+}
