@@ -1,6 +1,9 @@
 // All audit logic in one module. Sections below are ordered:
 // types → pure helpers → scanner → renderers → runner → entry.
 
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { TokenUsage } from "./parsers.js";
 import type { AgentSpec } from "./config.js";
 import { agentCommandName, agentIsEnabled } from "./config.js";
@@ -104,4 +107,67 @@ export function displayVerdictText(
 ): string {
   if (providerNote) return `ok (${providerNote} — see Notes)`;
   return `${tier} (${Math.round(pct * 100)}% at turn ${turn})`;
+}
+
+export function scanClaudeHooks(claudeHome: string = path.join(os.homedir(), ".claude")): Offender[] {
+  const root = path.join(claudeHome, "plugins", "cache");
+  if (!existsSync(root)) return [];
+  const out: Offender[] = [];
+  for (const file of walkForHooksJson(root)) {
+    let body: any;
+    try {
+      body = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    const entries = body?.hooks?.SessionStart;
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const matcher = typeof entry?.matcher === "string" ? entry.matcher : "";
+      const tokens = matcher.split("|").map((s: string) => s.trim().toLowerCase());
+      if (!tokens.includes("resume")) continue;
+      out.push({
+        name: pluginNameFromPath(root, file),
+        file,
+        pattern: "SessionStart+resume",
+        effect: "injects content on every --resume, invalidating prefix cache",
+        patch: "remove 'resume' from the matcher or scope it to non-resume SessionStart events",
+      });
+    }
+  }
+  return out;
+}
+
+function walkForHooksJson(root: string): string[] {
+  const found: string[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e);
+      let s;
+      try {
+        s = statSync(full);
+      } catch {
+        continue;
+      }
+      if (s.isDirectory()) stack.push(full);
+      else if (e === "hooks.json" && path.basename(dir) === "hooks") found.push(full);
+    }
+  }
+  return found;
+}
+
+function pluginNameFromPath(root: string, file: string): string {
+  // file = root/<org>/<plugin>/<version>/hooks/hooks.json — emit "<plugin>@<version>"
+  const rel = path.relative(root, file);
+  const parts = rel.split(path.sep);
+  if (parts.length >= 4) return `${parts[parts.length - 4]}@${parts[parts.length - 3]}`;
+  return rel;
 }

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   auditabilityReason,
   auditableAgentNames,
@@ -6,9 +9,28 @@ import {
   numericVerdict,
   providerQualifier,
   displayVerdictText,
+  scanClaudeHooks,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { Offender } from "../src/audit.js";
+
+const tempDirs: string[] = [];
+function tmp(): string {
+  const d = mkdtempSync(path.join(os.tmpdir(), "relevo-audit-"));
+  tempDirs.push(d);
+  return d;
+}
+afterEach(() => {
+  for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function writeHooks(root: string, plugin: string, version: string, body: object): string {
+  const dir = path.join(root, "plugins", "cache", "org", plugin, version, "hooks");
+  mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "hooks.json");
+  writeFileSync(f, JSON.stringify(body));
+  return f;
+}
 
 const specs: Record<string, AgentSpec> = {
   claude: { cmd: "claude {prompt}", parser: "claude-json", resume_template: "claude --resume {session_id} {prompt}" },
@@ -108,5 +130,47 @@ describe("displayVerdictText", () => {
   it("softens to 'ok (<qualifier> — see Notes)' when qualifier present", () => {
     expect(displayVerdictText("investigate", 0.33, "provider-typical for codex", 4))
       .toBe("ok (provider-typical for codex — see Notes)");
+  });
+});
+
+describe("scanClaudeHooks", () => {
+  it("returns [] when the plugin cache root does not exist", () => {
+    const home = tmp();
+    expect(scanClaudeHooks(home)).toEqual([]);
+  });
+
+  it("detects SessionStart matcher containing 'resume' as a |-token", () => {
+    const home = tmp();
+    writeHooks(home, "vercel", "0.43.0", {
+      hooks: { SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [] }] },
+    });
+    const found = scanClaudeHooks(home);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.name).toBe("vercel@0.43.0");
+    expect(found[0]!.pattern).toBe("SessionStart+resume");
+  });
+
+  it("does NOT flag matchers where 'resume' is only a substring", () => {
+    const home = tmp();
+    writeHooks(home, "x", "1.0.0", {
+      hooks: { SessionStart: [{ matcher: "startup|resumeOnly|other", hooks: [] }] },
+    });
+    expect(scanClaudeHooks(home)).toEqual([]);
+  });
+
+  it("is case-insensitive on token compare", () => {
+    const home = tmp();
+    writeHooks(home, "y", "2.0.0", {
+      hooks: { SessionStart: [{ matcher: "Resume", hooks: [] }] },
+    });
+    expect(scanClaudeHooks(home)).toHaveLength(1);
+  });
+
+  it("skips malformed JSON without crashing", () => {
+    const home = tmp();
+    const dir = path.join(home, "plugins", "cache", "org", "bad", "1.0.0", "hooks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "hooks.json"), "{not json");
+    expect(scanClaudeHooks(home)).toEqual([]);
   });
 });
