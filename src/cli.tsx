@@ -19,6 +19,11 @@ perfObserver.observe({ entryTypes: ["measure", "mark"], buffered: false });
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  // Audit subcommand: non-interactive, has its own --help, bypasses the TTY gate.
+  if (argv[0] === "audit") {
+    const { runAudit } = await import("./audit.js");
+    return runAudit(argv.slice(1));
+  }
   if (argv.some((a) => a === "-h" || a === "--help")) {
     ensureDirsSync();
     const config = loadConfig();
