@@ -54,6 +54,9 @@ Usage:
   /help               this message
   /exit               quit
 
+Subcommands:
+  relevo audit        cache-hit audit for each auditable agent CLI (run \`relevo audit --help\`)
+
 Agents: ${agents}
 Current task: ${getActiveTask() ?? "(none yet; type a prompt to start one)"}
 Working directory: ${projectDir()}
