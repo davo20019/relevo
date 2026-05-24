@@ -270,3 +270,59 @@ export function computeExitCode(r: AuditResult): 0 | 1 | 2 {
   }
   return 0;
 }
+
+export type AuditOpts = {
+  agent: string | null;
+  turns: number;
+  prompt: string;
+  explain: boolean;
+  keep: boolean;
+  json: boolean;
+  helpRequested: boolean;
+};
+
+const DEFAULT_PROMPT = "Reply with exactly the word OK. No other text.";
+
+export type ParseResult =
+  | { ok: true; opts: AuditOpts }
+  | { ok: false; error: string };
+
+export function parseAuditArgs(argv: string[]): ParseResult {
+  const opts: AuditOpts = {
+    agent: null,
+    turns: 4,
+    prompt: DEFAULT_PROMPT,
+    explain: true,
+    keep: false,
+    json: false,
+    helpRequested: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--help" || a === "-h") opts.helpRequested = true;
+    else if (a === "--no-explain") opts.explain = false;
+    else if (a === "--explain") opts.explain = true;
+    else if (a === "--keep") opts.keep = true;
+    else if (a === "--json") opts.json = true;
+    else if (a === "--agent") {
+      const v = argv[++i];
+      if (v === undefined) return { ok: false, error: "error: --agent requires a value" };
+      opts.agent = v;
+    } else if (a === "--turns") {
+      const v = argv[++i];
+      if (v === undefined) return { ok: false, error: "error: --turns requires a value" };
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 2) {
+        return { ok: false, error: `error: --turns must be an integer ≥ 2 (got '${v}')` };
+      }
+      opts.turns = n;
+    } else if (a === "--prompt") {
+      const v = argv[++i];
+      if (v === undefined) return { ok: false, error: "error: --prompt requires a value" };
+      opts.prompt = v;
+    } else {
+      return { ok: false, error: `error: unknown flag '${a}'. see 'relevo audit --help'` };
+    }
+  }
+  return { ok: true, opts };
+}

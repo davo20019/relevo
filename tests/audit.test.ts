@@ -15,6 +15,7 @@ import {
   renderTextOutput,
   renderJsonOutput,
   computeExitCode,
+  parseAuditArgs,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { AuditResult, AgentResult, Offender } from "../src/audit.js";
@@ -361,5 +362,61 @@ describe("computeExitCode", () => {
       skipped: {}, hookScan: {},
     };
     expect(computeExitCode(r)).toBe(1);
+  });
+});
+
+describe("parseAuditArgs", () => {
+  it("returns defaults for empty argv", () => {
+    const r = parseAuditArgs([]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.opts).toEqual({
+      agent: null,
+      turns: 4,
+      prompt: "Reply with exactly the word OK. No other text.",
+      explain: true,
+      keep: false,
+      json: false,
+      helpRequested: false,
+    });
+  });
+  it("--help / -h sets helpRequested", () => {
+    const r1 = parseAuditArgs(["--help"]);
+    if (!r1.ok) throw new Error(r1.error);
+    expect(r1.opts.helpRequested).toBe(true);
+    const r2 = parseAuditArgs(["-h"]);
+    if (!r2.ok) throw new Error(r2.error);
+    expect(r2.opts.helpRequested).toBe(true);
+  });
+  it("parses --agent --turns --prompt --no-explain --keep --json", () => {
+    const r = parseAuditArgs(["--agent", "claude", "--turns", "6", "--prompt", "ping", "--no-explain", "--keep", "--json"]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.opts.agent).toBe("claude");
+    expect(r.opts.turns).toBe(6);
+    expect(r.opts.prompt).toBe("ping");
+    expect(r.opts.explain).toBe(false);
+    expect(r.opts.keep).toBe(true);
+    expect(r.opts.json).toBe(true);
+  });
+  it("rejects --turns 1", () => {
+    const r = parseAuditArgs(["--turns", "1"]);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected error");
+    expect(r.error).toMatch(/--turns must be an integer ≥ 2/);
+  });
+  it("rejects non-integer --turns", () => {
+    const r1 = parseAuditArgs(["--turns", "abc"]);
+    expect(r1.ok).toBe(false);
+    const r2 = parseAuditArgs(["--turns", "2.5"]);
+    expect(r2.ok).toBe(false);
+  });
+  it("rejects unknown flag", () => {
+    const r = parseAuditArgs(["--foo"]);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected error");
+    expect(r.error).toMatch(/unknown flag '--foo'/);
+  });
+  it("rejects --agent without a value", () => {
+    const r = parseAuditArgs(["--agent"]);
+    expect(r.ok).toBe(false);
   });
 });
