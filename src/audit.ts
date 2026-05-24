@@ -95,3 +95,13 @@ export function providerQualifier(
   }
   return null;
 }
+
+export function displayVerdictText(
+  tier: VerdictTier,
+  pct: number,
+  providerNote: string | null,
+  turn: number,
+): string {
+  if (providerNote) return `ok (${providerNote} — see Notes)`;
+  return `${tier} (${Math.round(pct * 100)}% at turn ${turn})`;
+}

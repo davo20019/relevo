@@ -5,6 +5,7 @@ import {
   tokenMetrics,
   numericVerdict,
   providerQualifier,
+  displayVerdictText,
 } from "../src/audit.js";
 import type { AgentSpec } from "../src/config.js";
 import type { Offender } from "../src/audit.js";
@@ -95,5 +96,17 @@ describe("providerQualifier", () => {
   });
   it("claude at 33% → no qualifier (not codex)", () => {
     expect(providerQualifier("claude", 0.33, [])).toBeNull();
+  });
+});
+
+describe("displayVerdictText", () => {
+  it("renders raw tier with pct when no qualifier", () => {
+    expect(displayVerdictText("excellent", 0.99, null, 4)).toBe("excellent (99% at turn 4)");
+    expect(displayVerdictText("ok", 0.88, null, 4)).toBe("ok (88% at turn 4)");
+    expect(displayVerdictText("investigate", 0.44, null, 4)).toBe("investigate (44% at turn 4)");
+  });
+  it("softens to 'ok (<qualifier> — see Notes)' when qualifier present", () => {
+    expect(displayVerdictText("investigate", 0.33, "provider-typical for codex", 4))
+      .toBe("ok (provider-typical for codex — see Notes)");
   });
 });
