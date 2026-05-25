@@ -66,9 +66,9 @@ describe("persisted default", () => {
     const cwd = process.cwd();
     try {
       process.chdir(project);
-      saveGlobalDefaultAgent("claude", { homeDir: home });
+      saveGlobalDefaultAgent("claude", { homeDir: home, env: {} });
       saveProjectDefaultAgent("codex");
-      expect(loadPersistedDefault({ homeDir: home })).toEqual({
+      expect(loadPersistedDefault({ homeDir: home, env: {} })).toEqual({
         agent: "codex",
         source: "local",
       });
@@ -107,9 +107,9 @@ describe("saveGlobalDefaultAgent", () => {
   it("writes global settings under config home", () => {
     const home = tempDir();
     const settingsPath = path.join(home, ".config", "relevo", "settings.json");
-    saveGlobalDefaultAgent("claude", { homeDir: home });
+    saveGlobalDefaultAgent("claude", { homeDir: home, env: {} });
     expect(existsSync(settingsPath)).toBe(true);
-    expect(loadPersistedDefault({ homeDir: home })).toEqual({
+    expect(loadPersistedDefault({ homeDir: home, env: {} })).toEqual({
       agent: "claude",
       source: "global",
     });
@@ -123,7 +123,7 @@ describe("legacy focus_agent migration", () => {
     mkdirSync(settingsDir, { recursive: true });
     const settingsPath = path.join(settingsDir, "settings.json");
     writeFileSync(settingsPath, JSON.stringify({ focus_agent: "claude" }) + "\n", "utf8");
-    expect(loadPersistedDefault({ homeDir: home })).toEqual({
+    expect(loadPersistedDefault({ homeDir: home, env: {} })).toEqual({
       agent: "claude",
       source: "global",
     });
