@@ -1,5 +1,9 @@
 # relevo
 
+[![CI](https://github.com/davo20019/relevo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/davo20019/relevo/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/relevo.svg)](https://www.npmjs.com/package/relevo)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A multi-agent coding workspace that sits in front of local coding-agent CLIs so
 you can drive Claude Code, Codex, OpenCode, Cursor CLI, Antigravity (`agy`), and
 similar tools from one terminal. Each agent's transcript is fed back to the
@@ -122,12 +126,21 @@ npm run dev   # or: npm run build && npm start
   `context_turns` (default 3) of their own prior turns are still included.
 - Each agent runs in your current working directory, exactly as if you had typed
   the CLI command directly. They share files in that directory.
-- Per-project state lives in `./.relay/`. Add it to your project's `.gitignore`.
+- New task transcripts and native session ids live in a user-private Relevo
+  application state directory, keyed by `.relay/project.json`. Project-local
+  `.relay/` contains local identity and settings only; add it to your project's
+  `.gitignore`. Deleting `.relay/project.json` disconnects this checkout from
+  its existing state bucket, but it does not delete the user-private state
+  directory. Override the state root with `RELEVO_STATE_HOME` if you need a
+  custom location (e.g. for tests or shared sandboxes).
+- **Upgrading from earlier versions:** existing `.relay/tasks/…` directories
+  keep working in place via a legacy fallback, so no migration is required.
+  Only newly created tasks land in the user-private state directory.
 - Work is organized by task. Each relevo invocation starts fresh by default; a
   task is created lazily on your first prompt and auto-named from that prompt.
   Use `/resume` to pick up a previous task in this project.
-  - `.relay/tasks/<task>/transcripts/<agent>.md`: what each agent said in this task
-  - `.relay/tasks/<task>/sessions.json`: native session IDs for resumable agents
+  Legacy tasks created by older Relevo versions remain readable and continue
+  writing their old Markdown transcripts after `/resume`.
 - `/task list` shows tasks on disk. `/task rename <new>` renames the current
   task. `/resume` shows the 12 most recent tasks; older tasks remain on disk
   and can still be listed with `/task list`.
@@ -187,7 +200,7 @@ relevo
 | `/default session <agent>` | temporary override until quit |
 | `/default` | show global, project, and active default |
 | `/default clear [global\|local\|session]` | clear saved or session default |
-| `/after @agent: <prompt>` | queue a prompt to fire after that agent's current/last run finishes (any terminal state) |
+| `/after @agent: <prompt>` | queue a prompt to fire after that agent's current/last run finishes (any terminal state); the dispatched prompt is prefixed with a structured handoff block describing the exact upstream turn (run id, files touched, response preview, full-turn file path) |
 | `/cancel @<agent>` | cancel only that agent's active run(s); Esc still cancels every active run |
 | `/sync [@agents...]` | reserved for task-state rebroadcasting; not implemented yet |
 | `/image <path>` | queue an image file for the next dispatch |
@@ -353,6 +366,35 @@ flag or switch Claude back to `--permission-mode acceptEdits`.
   It currently targets macOS.
 - Anything that works as `claude`, `codex`, or another configured CLI in your
   normal terminal should work here.
+
+## Security
+
+relevo is a **local orchestration layer**: it spawns coding-agent CLIs you
+already trust and runs them in your project directory with the permissions those
+CLIs grant. It does not call cloud APIs on its own.
+
+- See [SECURITY.md](SECURITY.md) for how to report vulnerabilities, supported
+  versions, and the threat model.
+- Default `agents.json` templates use unattended automation flags (permission
+  skips, sandbox-off, MCP auto-approval). See
+  [Automation defaults](#automation-defaults) and tighten per-agent commands if
+  you need a more cautious setup.
+
+### Running in untrusted repositories
+
+If you clone a repository you do not trust and run `relevo` from that
+directory, a project-local `./agents.json` can override your user config and
+define arbitrary commands for agent names. That is the same class of risk as
+running `npm install` or `make` in an untrusted repo: only run relevo in
+directories you trust, or point `RELEVO_CONFIG` at a config file you control.
+
+Do not commit `.relay/` or relevo state directories; they can contain prompts,
+transcripts, and session identifiers from your work.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
+setup and testing. The project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
 ## Not Goals
 

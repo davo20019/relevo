@@ -19,6 +19,13 @@ describe("newRun", () => {
     expect(a.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(a.id).not.toBe(b.id);
   });
+
+  it("starts with empty metadata arrays", () => {
+    const r = newRun("codex", "#fff", "prompt");
+    expect(r.filesEdited).toEqual([]);
+    expect(r.toolsUsed).toEqual([]);
+    expect(r.events).toEqual([]);
+  });
 });
 
 describe("activitySuffix", () => {

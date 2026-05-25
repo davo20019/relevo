@@ -32,8 +32,8 @@ export async function saveSessionId(agent: string, sessionId: string): Promise<v
   await withSessionWriteLock(f, async () => {
     const sessions = loadSessions();
     sessions[agent] = sessionId;
-    await mkdir(path.dirname(f), { recursive: true });
-    await writeFile(f, JSON.stringify(sessions, null, 2));
+    await mkdir(path.dirname(f), { recursive: true, mode: 0o700 });
+    await writeFile(f, JSON.stringify(sessions, null, 2), { mode: 0o600 });
   });
 }
 
@@ -48,7 +48,7 @@ export async function clearAgentSession(agent: string): Promise<void> {
     const sessions = loadSessions();
     if (!(agent in sessions)) return;
     delete sessions[agent];
-    await mkdir(path.dirname(f), { recursive: true });
-    await writeFile(f, JSON.stringify(sessions, null, 2));
+    await mkdir(path.dirname(f), { recursive: true, mode: 0o700 });
+    await writeFile(f, JSON.stringify(sessions, null, 2), { mode: 0o600 });
   });
 }

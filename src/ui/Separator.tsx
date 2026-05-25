@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
-// Full-width horizontal rule, optionally with a label embedded near the left:
-//   ─── 10:53:14 ─────────────────────────────────────
+// Full-width horizontal rule, optionally with a centered label:
+//   ─────────────── 10:53:14 · task ───────────────────
 // Single `─` between turns in the same task, double `═` across task
 // boundaries so they pop louder than turn boundaries.
 export function Separator({

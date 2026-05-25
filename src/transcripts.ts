@@ -1,13 +1,27 @@
 import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { transcriptDir } from "./paths.js";
+import { currentTask, projectDir, transcriptDir } from "./paths.js";
+import { getActiveTaskStorage } from "./tasks.js";
+import {
+  appendStructuredTurn,
+  formatTurnsAsLegacyMarkdownSync,
+  readIndexSync,
+} from "./transcriptStore.js";
 
 export function transcriptPath(agent: string): string {
+  if (getActiveTaskStorage() === "legacy") {
+    return path.join(projectDir(), ".relay", "tasks", currentTask(), "transcripts", `${agent}.md`);
+  }
   return path.join(transcriptDir(), `${agent}.md`);
 }
 
 export function readLastTurns(agent: string, n: number): string {
+  if (getActiveTaskStorage() !== "legacy") {
+    const entries = readIndexSync(agent).slice(-n);
+    if (entries.length > 0) return formatTurnsAsLegacyMarkdownSync(agent, entries);
+  }
   const p = transcriptPath(agent);
   if (!existsSync(p)) return "";
   const text = readFileSync(p, "utf8");
@@ -22,6 +36,15 @@ export async function appendTurn(
   userPrompt: string,
   response: string,
 ): Promise<void> {
+  if (getActiveTaskStorage() !== "legacy") {
+    await appendStructuredTurn(agent, {
+      runId: randomUUID(),
+      status: "completed",
+      userPrompt,
+      response,
+    });
+    return;
+  }
   const p = transcriptPath(agent);
   await mkdir(path.dirname(p), { recursive: true });
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "");

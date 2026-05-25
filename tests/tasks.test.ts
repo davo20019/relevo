@@ -13,10 +13,12 @@ import {
   clearActiveTaskForTest,
   createTaskDir,
   getActiveTask,
+  getActiveTaskStorage,
   listRecentTasks,
   provisionalTaskName,
   renameTask,
   setActiveTask,
+  setActiveTaskStorage,
   slugFromPrompt,
   validateTaskName,
 } from "../src/tasks.js";
@@ -232,6 +234,63 @@ describe("listRecentTasks", () => {
     expect(entry?.name).toBe("fixme");
     expect(entry?.agents.sort()).toEqual(["claude", "codex"]);
     expect(entry?.firstPrompt).toBe("Fix the auth bug today");
+    expect(entry?.storage).toBe("legacy");
+  });
+
+  it("surfaces JSONL agents, storage, recency, and prompt preview", () => {
+    const root = tempDir();
+    const oldTask = path.join(root, "old-jsonl");
+    const newTask = path.join(root, "new-jsonl");
+    mkdirSync(oldTask, { recursive: true });
+    mkdirSync(newTask, { recursive: true });
+    writeFileSync(
+      path.join(oldTask, "claude.index.jsonl"),
+      JSON.stringify({
+        v: 1,
+        turn_id: "01HOLD",
+        run_id: "run-old",
+        agent: "claude",
+        started_at: "2026-01-01T00:00:00.000Z",
+        completed_at: "2026-01-01T00:00:01.000Z",
+        status: "completed",
+        prompt_preview: "Old prompt",
+        response_preview: "Old response",
+        files_edited: [],
+        tools_used: [],
+        token_totals: null,
+        depends_on: null,
+        turn_path: "transcripts/claude/01HOLD.json",
+      }) + "\n",
+    );
+    writeFileSync(
+      path.join(newTask, "codex.index.jsonl"),
+      JSON.stringify({
+        v: 1,
+        turn_id: "01HNEW",
+        run_id: "run-new",
+        agent: "codex",
+        started_at: "2026-05-01T00:00:00.000Z",
+        completed_at: "2026-05-01T00:00:01.000Z",
+        status: "completed",
+        prompt_preview: "New structured prompt with enough text",
+        response_preview: "New response",
+        files_edited: [],
+        tools_used: [],
+        token_totals: null,
+        depends_on: null,
+        turn_path: "transcripts/codex/01HNEW.json",
+      }) + "\n",
+    );
+    const oldTime = new Date("2026-01-01T00:00:00Z");
+    const newTime = new Date("2026-05-01T00:00:00Z");
+    utimesSync(path.join(oldTask, "claude.index.jsonl"), oldTime, oldTime);
+    utimesSync(path.join(newTask, "codex.index.jsonl"), newTime, newTime);
+
+    const list = listRecentTasks(root);
+    expect(list.map((t) => t.name)).toEqual(["new-jsonl", "old-jsonl"]);
+    expect(list[0]?.agents).toEqual(["codex"]);
+    expect(list[0]?.firstPrompt).toBe("New structured prompt with enough text");
+    expect(list[0]?.storage).toBe("jsonl");
   });
 
   it("uses transcript file mtimes for recency", () => {
@@ -284,7 +343,18 @@ describe("active task state", () => {
 
   it("clearActiveTaskForTest resets to null", () => {
     setActiveTask("something");
+    setActiveTaskStorage("legacy");
     clearActiveTaskForTest();
     expect(getActiveTask()).toBeNull();
+    expect(getActiveTaskStorage()).toBe("jsonl");
+  });
+
+  it("tracks active task storage mode separately from the active task name", () => {
+    clearActiveTaskForTest();
+    setActiveTask("legacy-task");
+    setActiveTaskStorage("legacy");
+
+    expect(getActiveTask()).toBe("legacy-task");
+    expect(getActiveTaskStorage()).toBe("legacy");
   });
 });

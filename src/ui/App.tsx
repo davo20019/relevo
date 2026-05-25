@@ -11,7 +11,8 @@ import {
   type AgentConfig,
   type AgentSpec,
 } from "../config.js";
-import { buildContext } from "../context.js";
+import { buildAgentPrompt, buildHandoffBlock } from "../context.js";
+import { recordDispatch } from "../dispatchStats.js";
 import { buildHelpText } from "../help.js";
 import {
   extractImagePaths,
@@ -25,10 +26,17 @@ import {
 import { openInNewTerminal } from "../openWindow.js";
 import {
   ensureTask,
+  projectStateRoot,
   projectDir,
 } from "../paths.js";
 import { clearAgentSession, loadSessions } from "../sessions.js";
-import { appendTurn, readLastTurns } from "../transcripts.js";
+import { appendTurn as appendLegacyTurn, readLastTurns } from "../transcripts.js";
+import {
+  appendStructuredTurn,
+  readDependencyTurnSync,
+  type TurnDependency,
+  type TurnStatus,
+} from "../transcriptStore.js";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -92,13 +100,41 @@ import { clearTaskContext } from "../taskCleanup.js";
 import {
   createTaskDir,
   getActiveTask,
+  getActiveTaskStorage,
   listRecentTasks,
   provisionalTaskName,
   renameTask,
   setActiveTask,
+  setActiveTaskStorage,
   slugFromPrompt,
+  type TaskInfo,
   validateTaskName,
 } from "../tasks.js";
+
+function RoutingNotice({
+  text,
+  agentColor,
+  liveAgents,
+}: {
+  text: string;
+  agentColor: Record<string, string>;
+  liveAgents: Set<string>;
+}) {
+  const segments = colorizeAgentMentions(text, agentColor, liveAgents);
+  return (
+    <Text color="gray">
+      {segments.map((seg, i) =>
+        seg.color ? (
+          <Text key={i} color={seg.color} bold={seg.bold}>
+            {seg.text}
+          </Text>
+        ) : (
+          seg.text
+        ),
+      )}
+    </Text>
+  );
+}
 
 function formatClockLabel(turn: { at: Date; task: string }): string {
   const hh = String(turn.at.getHours()).padStart(2, "0");
@@ -124,26 +160,49 @@ const LEVEL_STYLE: Record<LogLevel, { color?: string; dim?: boolean }> = {
   error: { color: "red" },
   raw: {},
 };
+type SkippedNotice = {
+  id: string;
+  lines: SkippedLine[];
+  agentColor: Record<string, string>;
+};
 type CompletedTurn = {
   id: string;
   prompt: string;
   runs: AgentRunState[];
   task: string;
   at: Date;
-};
-type SkippedHistoryItem = {
-  kind: "skipped";
-  id: string;
-  lines: SkippedLine[];
-  agentColor: Record<string, string>;
+  skipped?: SkippedNotice;
+  routing?: string;
 };
 type HistoryItem =
   | { kind: "log"; line: LogLine }
-  | { kind: "skipped"; item: SkippedHistoryItem }
   | { kind: "turn"; turn: CompletedTurn };
 
 let HIST_SEQ = 0;
 const nextId = () => `h${++HIST_SEQ}`;
+
+function jsonlTasksRoot(): string {
+  return path.join(projectStateRoot(), "tasks");
+}
+
+function legacyTasksRoot(): string {
+  return path.join(projectDir(), ".relay", "tasks");
+}
+
+function recentTasks(): TaskInfo[] {
+  const byName = new Map<string, TaskInfo>();
+  for (const task of listRecentTasks(legacyTasksRoot())) byName.set(task.name, task);
+  for (const task of listRecentTasks(jsonlTasksRoot())) byName.set(task.name, task);
+  return [...byName.values()].sort(
+    (a, b) => b.lastActivity.getTime() - a.lastActivity.getTime(),
+  );
+}
+
+function statusFromRun(run: AgentRunState): TurnStatus {
+  if (run.cancelled) return "cancelled";
+  if (run.interrupted) return "interrupted";
+  return run.finalStatus === "done" ? "completed" : "failed";
+}
 
 export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const { exit } = useApp();
@@ -312,6 +371,49 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     setHistory((h) => [...h, { kind: "log", line: { id: nextId(), text, level } }]);
   }, []);
 
+  // Returns true when the turn was durably appended (and so a `/after` dependent
+  // may safely drain on it), false when the storage write was swallowed so a
+  // dependent should NOT drain against a missing or partial upstream.
+  const recordTurn = useCallback(
+    async (
+      agent: string,
+      spec: AgentSpec,
+      userPrompt: string,
+      run: AgentRunState,
+      dependsOn: TurnDependency | null = null,
+    ): Promise<boolean> => {
+      const response = run.responseChunks.join("");
+      try {
+        if (getActiveTaskStorage() === "legacy") {
+          await appendLegacyTurn(agent, userPrompt, response);
+          return true;
+        }
+        await appendStructuredTurn(agent, {
+          runId: run.id,
+          status: statusFromRun(run),
+          userPrompt,
+          response,
+          filesEdited: run.filesEdited,
+          toolsUsed: run.toolsUsed,
+          events: run.events,
+          tokens: run.tokens
+            ? {
+                in: run.tokens.input + run.tokens.cacheCreate + run.tokens.cacheRead,
+                out: run.tokens.output,
+              }
+            : null,
+          agentSpec: spec,
+          dependsOn,
+        });
+        return true;
+      } catch (e: any) {
+        log(`could not record @${agent} turn: ${e?.message ?? e}`, "warn");
+        return false;
+      }
+    },
+    [log],
+  );
+
   useInput((rawInput, key) => {
     if (key.ctrl && rawInput === "c") {
       const now = Date.now();
@@ -345,8 +447,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   useEffect(() => {
     if (migrationNoticeShownRef.current) return;
     if (getActiveTask()) return;
-    const tasksRoot = path.join(projectDir(), ".relay", "tasks");
-    if (listRecentTasks(tasksRoot).length === 0) return;
+    if (listRecentTasks(legacyTasksRoot()).length === 0) return;
     migrationNoticeShownRef.current = true;
     log("relevo now starts a fresh task by default. type /resume to continue prior work.");
   }, [log]);
@@ -355,27 +456,62 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
     return getActiveTask() ?? "(no active task)";
   }
 
+  // Skipped `@all` notices live inside the triggering turn so they render
+  // between the prompt and the agent panels. The ref holds notices captured
+  // synchronously during input parsing; dispatch drains it at commit time and
+  // attaches the merged notice to the CompletedTurn. Live dispatches read the
+  // same notice via state so the block is visible before the turn commits.
+  const pendingSkippedRef = useRef<SkippedNotice[]>([]);
+  const [liveSkipped, setLiveSkipped] = useState<SkippedNotice | null>(null);
   const pushSkipped = useCallback(
     (skipped: string[], reasons: Record<string, string | undefined>) => {
       const lines = buildSkippedBlock(skipped, reasons);
       if (lines.length === 0) return;
-      const snapshot = { ...agentColor };
-      setHistory((h) => [
-        ...h,
-        { kind: "skipped", item: { kind: "skipped", id: nextId(), lines, agentColor: snapshot } },
-      ]);
+      const notice: SkippedNotice = {
+        id: nextId(),
+        lines,
+        agentColor: { ...agentColor },
+      };
+      pendingSkippedRef.current.push(notice);
+      setLiveSkipped(notice);
     },
     [agentColor],
   );
+  const takePendingSkipped = useCallback((): SkippedNotice | undefined => {
+    const queue = pendingSkippedRef.current;
+    if (queue.length === 0) return undefined;
+    const head = queue.shift()!;
+    if (queue.length === 0) setLiveSkipped(null);
+    else setLiveSkipped(queue[queue.length - 1]!);
+    return head;
+  }, []);
+
+  // Routing notices ("routing to @x. @y also mentioned ...") attach to the
+  // triggering turn so they render below the separator instead of above it —
+  // they're part of *this* convo, not a tail-end remark on the previous one.
+  const pendingRoutingRef = useRef<string | null>(null);
+  const [liveRouting, setLiveRouting] = useState<string | null>(null);
+  const pushRouting = useCallback((text: string) => {
+    pendingRoutingRef.current = text;
+    setLiveRouting(text);
+  }, []);
+  const takePendingRouting = useCallback((): string | undefined => {
+    const text = pendingRoutingRef.current;
+    if (text === null) return undefined;
+    pendingRoutingRef.current = null;
+    setLiveRouting(null);
+    return text;
+  }, []);
 
   const dispatchSingle = useCallback(
     async (
       agentName: string,
       spec: AgentSpec,
       userPrompt: string,
-      fullPrompt: string,
+      getFullPrompt: () => string,
       displayPrompt: string,
       background?: boolean,
+      dependsOn: TurnDependency | null = null,
     ) => {
       // Default rule: a dispatch is background iff something else is already
       // in flight. Callers may pre-compute and pass an explicit value when
@@ -398,12 +534,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       // any of those paths leaves the run "live" in the UI forever and pins
       // activeRunCountRef > 0, blocking the deferred-resize flow.
       try {
+        const fullPrompt = getFullPrompt();
         const prep = await prepareCommand(agentName, spec, fullPrompt);
         const spawned = spawnProc(prep.args, prep.viaStdin, fullPrompt);
         if (spawned.error) {
           log(spawned.error, "error");
           return null;
         }
+        recordDispatch(agentName, spec.parser);
         const proc = spawned.proc!;
         activeProcsRef.current = [
           ...activeProcsRef.current,
@@ -428,11 +566,18 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             Boolean(spec.resume_template);
           if (recoverable) {
             await clearAgentSession(agentName);
-            const retryPrep = await prepareCommand(agentName, spec, fullPrompt);
-            const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
+            // Re-resolve the prompt now that the native session is gone — this
+            // re-runs buildContext, which will include self-history that the
+            // initial call suppressed (see context.ts's hasNative branch).
+            // Without this, the fresh-session retry receives only the bare user
+            // prompt and loses all prior-turn context.
+            const retryFullPrompt = getFullPrompt();
+            const retryPrep = await prepareCommand(agentName, spec, retryFullPrompt);
+            const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, retryFullPrompt);
             if (retrySpawned.error) {
               log(`@${agentName} session expired and retry failed: ${retrySpawned.error}`, "error");
             } else {
+              recordDispatch(agentName, spec.parser);
               log(`@${agentName} ↻ session expired, retrying with a fresh session`, "warn");
               resetRunForRetry(run, "");
               activeProcsRef.current = activeProcsRef.current.map((p) =>
@@ -473,28 +618,32 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           runs: [run],
           task: safeCurrentTask(),
           at: new Date(run.start),
+          skipped: takePendingSkipped(),
+          routing: takePendingRouting(),
         };
         setHistory((h) => [...h, { kind: "turn", turn: completed }]);
+        // Append-before-drain: only let `/after` dependents see this run as
+        // completed once its turn is durable on disk. If the storage write
+        // failed (recordTurn swallowed the error and returned false), the
+        // dependent stays queued until Esc — otherwise it would dispatch and
+        // buildHandoffBlock would resolve to null.
+        const appended = await recordTurn(agentName, spec, userPrompt, run, dependsOn);
+        if (appended) recordCompletedRun(agentName, run.id);
         if (run.cancelled || run.interrupted) return null;
         return run.responseChunks.join("");
       } finally {
         setActiveRuns((prev) => prev.filter((r) => r !== run));
-        recordCompletedRun(agentName, run.id);
-        if (run.background) {
-          const elapsed = Math.floor(((run.end ?? Date.now()) - run.start) / 1000);
-          log(`@${agentName} background task done in ${elapsed}s`);
-        }
         clearInFlight(agentName);
       }
     },
-    [agentColor, clearInFlight, log, markInFlight, recordCompletedRun],
+    [agentColor, clearInFlight, takePendingSkipped, takePendingRouting, log, markInFlight, recordCompletedRun, recordTurn],
   );
 
   const dispatchParallel = useCallback(
     async (
       agentNames: string[],
       userPrompt: string,
-      perAgentFullPrompts: Record<string, string>,
+      perAgentGetFullPrompt: Record<string, () => string>,
       displayPrompt: string,
     ) => {
       const liveMax = computeLiveMaxLines();
@@ -519,9 +668,10 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       const prepared = await Promise.all(
         agentNames.map(async (name, i) => {
           const spec = config.agents[name]!;
-          const fullPrompt = perAgentFullPrompts[name]!;
+          const fullPrompt = perAgentGetFullPrompt[name]!();
           const prep = await prepareCommand(name, spec, fullPrompt);
           const spawned = spawnProc(prep.args, prep.viaStdin, fullPrompt);
+          if (!spawned.error) recordDispatch(name, spec.parser);
           return { name, spec, prep, spawned, run: runs[i]! };
         }),
       );
@@ -556,14 +706,19 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
               !p.run.interrupted &&
               Boolean(p.spec.resume_template);
             if (!recoverable) return;
-            const fullPrompt = perAgentFullPrompts[p.name]!;
             await clearAgentSession(p.name);
+            // Re-resolve the prompt now that the native session is gone — same
+            // reasoning as the single-dispatch retry path: buildContext was
+            // suppressing self-history while the session id was valid, so the
+            // pre-retry prompt would arrive at the fresh session contextless.
+            const fullPrompt = perAgentGetFullPrompt[p.name]!();
             const retryPrep = await prepareCommand(p.name, p.spec, fullPrompt);
             const retrySpawned = spawnProc(retryPrep.args, retryPrep.viaStdin, fullPrompt);
             if (retrySpawned.error) {
               log(`@${p.name} session expired and retry failed: ${retrySpawned.error}`, "error");
               return;
             }
+            recordDispatch(p.name, p.spec.parser);
             log(`@${p.name} ↻ session expired, retrying with a fresh session`, "warn");
             resetRunForRetry(p.run, "");
             const originalSpawned = p.spawned;
@@ -587,13 +742,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             // (we wait for siblings). The panel stays visible in activeRuns
             // until the whole batch commits below; clearInFlight just lets
             // the next queued prompt fire on this agent in the meantime.
-            // Record completion early too, so a queued /after on this run can drain
-            // immediately rather than waiting for the slowest sibling.
-            recordCompletedRun(p.name, p.run.id);
-            if (p.run.background) {
-              const elapsed = Math.floor(((p.run.end ?? Date.now()) - p.run.start) / 1000);
-              log(`@${p.name} background task done in ${elapsed}s`);
-            }
+            // Append-before-drain: `recordCompletedRun` is intentionally NOT
+            // here. It must run after `recordTurn` below so a queued `/after`
+            // can't drain on this run before its upstream turn is on disk.
             clearInFlight(p.name);
           }
         }),
@@ -638,15 +789,17 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         runs,
         task: safeCurrentTask(),
         at: new Date(runs[0]!.start),
+        skipped: takePendingSkipped(),
+        routing: takePendingRouting(),
       };
       setHistory((h) => [...h, { kind: "turn", turn: completed }]);
       const ourRuns = new Set(runs);
       setActiveRuns((prev) => prev.filter((r) => !ourRuns.has(r)));
 
       for (const p of prepared) {
-        if (!p.spawned.error && !p.run.cancelled && !p.run.interrupted) {
-          await appendTurn(p.name, userPrompt, p.run.responseChunks.join(""));
-        }
+        if (p.spawned.error) continue;
+        const appended = await recordTurn(p.name, p.spec, userPrompt, p.run);
+        if (appended) recordCompletedRun(p.name, p.run.id);
       }
       } finally {
         const ourRunsCleanup = new Set(runs);
@@ -655,7 +808,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         setInFlightFromRef();
       }
     },
-    [agentColor, clearInFlight, config.agents, log, recordCompletedRun, setInFlightFromRef],
+    [agentColor, clearInFlight, config.agents, takePendingSkipped, takePendingRouting, log, recordCompletedRun, recordTurn, setInFlightFromRef],
   );
 
   const resetVisibleTaskState = useCallback((message: string): void => {
@@ -678,10 +831,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const ensureActiveTask = useCallback(async (): Promise<string> => {
     const existing = getActiveTask();
     if (existing) return existing;
-    const tasksRoot = path.join(projectDir(), ".relay", "tasks");
+    const tasksRoot = jsonlTasksRoot();
     const name = createTaskDir(tasksRoot, provisionalTaskName());
     await ensureTask(name);
     setActiveTask(name);
+    setActiveTaskStorage("jsonl");
     // Defer the "started task" log until maybeAutoRenameProvisional settles
     // on a final name, so the user sees one tidy line instead of a provisional
     // slug followed immediately by a rename arrow.
@@ -708,7 +862,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       const slug = slugFromPrompt(firstPrompt);
       let finalName = candidate;
       if (slug) {
-        const tasksRoot = path.join(projectDir(), ".relay", "tasks");
+        const tasksRoot =
+          getActiveTaskStorage() === "legacy" ? legacyTasksRoot() : jsonlTasksRoot();
         try {
           finalName = renameTask(tasksRoot, current, slug);
           setActiveTask(finalName);
@@ -1000,8 +1155,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           return;
         }
         if (sub === "list") {
-          const tasksRoot = path.join(projectDir(), ".relay", "tasks");
-          const recent = listRecentTasks(tasksRoot);
+          const recent = recentTasks();
           if (recent.length === 0) {
             log("no tasks yet in this project");
             return;
@@ -1023,11 +1177,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             log(`/task new: ${e?.message ?? e}`, "error");
             return;
           }
-          const tasksRoot = path.join(projectDir(), ".relay", "tasks");
+          const tasksRoot = jsonlTasksRoot();
           // Refuse to silently shadow an existing task. The old behavior
           // created a sibling with a -2 suffix, which orphaned the original
           // and surprised users expecting `/task new <existing>` to continue.
-          if (existsSync(path.join(tasksRoot, raw))) {
+          if (recentTasks().some((t) => t.name === raw)) {
             log(
               `task '${raw}' already exists. use /resume to switch to it, or pick a different name.`,
               "warn",
@@ -1037,6 +1191,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           const name = createTaskDir(tasksRoot, raw);
           await ensureTask(name);
           setActiveTask(name);
+          setActiveTaskStorage("jsonl");
           autoRenameCandidateRef.current = null;
           resetVisibleTaskState(`created and switched to task: ${name}`);
           return;
@@ -1058,7 +1213,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
             log(`/task rename: ${e?.message ?? e}`, "error");
             return;
           }
-          const tasksRoot = path.join(projectDir(), ".relay", "tasks");
+          const tasksRoot =
+            getActiveTaskStorage() === "legacy" ? legacyTasksRoot() : jsonlTasksRoot();
           try {
             const finalName = renameTask(tasksRoot, current, target);
             setActiveTask(finalName);
@@ -1092,8 +1248,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
       async function handleResumeCommand(cmd: string) {
         const parts = cmd.split(/\s+/, 2);
-        const tasksRoot = path.join(projectDir(), ".relay", "tasks");
-        const recent = listRecentTasks(tasksRoot);
+        const recent = recentTasks();
         if (recent.length === 0) {
           log("no prior tasks in this project. type a prompt to start one.");
           return;
@@ -1130,6 +1285,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           return;
         }
         setActiveTask(picked.name);
+        setActiveTaskStorage(picked.storage);
         autoRenameCandidateRef.current = null;
         resetVisibleTaskState(`resumed task: ${picked.name}`);
       }
@@ -1164,6 +1320,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           return log(
             `no session yet for @${name} in task '${safeCurrentTask()}'. run @${name} at least once first.`,
             "warn",
+          );
+        // Session IDs come from external CLIs; reject anything that could break
+        // out of the shell command we are about to build.
+        if (!/^[A-Za-z0-9_.\-]{1,128}$/.test(sid))
+          return log(
+            `refusing to open @${name}: saved session id contains unexpected characters`,
+            "error",
           );
         const cmdToRun = tmpl.replace("{session_id}", sid);
         const { ok, error } = await openInNewTerminal(cmdToRun, projectDir());
@@ -1258,7 +1421,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
   // Dispatch a single pre-resolved queued item. Mirrors the single-agent tail
   // of the main dispatch path: ensure task → buildContext against the latest
-  // transcripts → dispatchSingle → appendTurn. Drained per-agent so each
+  // transcripts → dispatchSingle. Drained per-agent so each
   // queued target fires the instant its agent idles, regardless of siblings.
   const dispatchQueuedItem = useCallback(
     async (item: QueuedItem, background: boolean) => {
@@ -1266,22 +1429,46 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         await ensureActiveTask();
         const userPrompt = formatPromptForAgentImages(item.agent, item.cleaned, item.imagePaths);
         await maybeAutoRenameProvisional(userPrompt);
-        const ctx = buildContext(item.agent, config.agents, config.context_turns ?? 3, {
-          peerAgents: item.peerAgents,
-          contextCompaction: config.context_compaction,
-        });
-        const fullPrompt = ctx ? ctx + userPrompt : userPrompt;
-        const response = await dispatchSingle(
+        // Phase 2 `/after` handoff: when this item was queued via /after, render
+        // the bounded handoff for the exact upstream run captured at queue time
+        // and prepend it. Legacy-mode tasks have no JSONL index, so skip the
+        // handoff resolution entirely instead of logging a noisy warning on
+        // every /after dispatch.
+        let handoff: string | null = null;
+        let dep: TurnDependency | null = null;
+        if (item.dependsOn) {
+          dep = { agent: item.dependsOn.agent, run_id: item.dependsOn.runId };
+          if (getActiveTaskStorage() === "jsonl") {
+            // Resolve once, pin the upstream `turn_id` onto `dep` so the
+            // dependent's index entry records full lineage instead of forcing
+            // future chained /after readers to re-scan by run_id.
+            const upstream = readDependencyTurnSync(dep);
+            if (upstream) {
+              dep = { ...dep, turn_id: upstream.turn_id };
+              handoff = buildHandoffBlock(dep);
+            } else {
+              log(
+                `could not resolve upstream turn for @${dep.agent} run ${dep.run_id}; dispatching without handoff block`,
+                "warn",
+              );
+            }
+          }
+        }
+        const getFullPrompt = () =>
+          buildAgentPrompt(item.agent, config.agents, config.context_turns ?? 3, userPrompt, {
+            peerAgents: item.peerAgents,
+            contextCompaction: config.context_compaction,
+            handoff,
+          });
+        await dispatchSingle(
           item.agent,
           item.spec,
           userPrompt,
-          fullPrompt,
+          getFullPrompt,
           item.displayPrompt,
           background,
+          dep,
         );
-        if (response !== null) {
-          await appendTurn(item.agent, userPrompt, response);
-        }
       } catch (e: any) {
         clearInFlight(item.agent);
         log(`@${item.agent} queued dispatch failed: ${e?.message ?? e}`, "error");
@@ -1568,13 +1755,14 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           await ensureActiveTask();
           const userPrompt = formatPromptWithImages(cleaned, allImages);
           await maybeAutoRenameProvisional(userPrompt);
-          const perAgent: Record<string, string> = {};
+          const perAgent: Record<string, () => string> = {};
           for (const name of multi.agents) {
-            const ctx = buildContext(name, config.agents, config.context_turns ?? 3, {
-              peerAgents: requestedPeerAgents(cleaned, name, agents),
-              contextCompaction: config.context_compaction,
-            });
-            perAgent[name] = ctx ? ctx + userPrompt : userPrompt;
+            const peerAgents = requestedPeerAgents(cleaned, name, agents);
+            perAgent[name] = () =>
+              buildAgentPrompt(name, config.agents, config.context_turns ?? 3, userPrompt, {
+                peerAgents,
+                contextCompaction: config.context_compaction,
+              });
           }
           const displayPrompt = buildCompactDisplayPrompt(compactLine, agents, defaultAgent);
           await dispatchParallel(multi.agents, userPrompt, perAgent, displayPrompt);
@@ -1637,7 +1825,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }
         if (otherMentions.size > 0) {
           const others = [...otherMentions].map((n) => `@${n}`).join(", ");
-          log(
+          pushRouting(
             `routing to @${agent}. ${others} also mentioned, use ` +
               `@${agent} ${[...otherMentions].map((n) => `@${n}`).join(" ")} <prompt> for parallel dispatch.`,
           );
@@ -1661,28 +1849,26 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         await ensureActiveTask();
         const userPrompt = formatPromptForAgentImages(agent, cleaned, allImages);
         await maybeAutoRenameProvisional(userPrompt);
-        const ctx = buildContext(agent, config.agents, config.context_turns ?? 3, {
-          peerAgents: requestedPeerAgents(cleaned, agent, agents),
-          contextCompaction: config.context_compaction,
-        });
-        const fullPrompt = ctx ? ctx + userPrompt : userPrompt;
+        const peerAgents = requestedPeerAgents(cleaned, agent, agents);
+        const getFullPrompt = () =>
+          buildAgentPrompt(agent, config.agents, config.context_turns ?? 3, userPrompt, {
+            peerAgents,
+            contextCompaction: config.context_compaction,
+          });
         const displayPrompt = displayPromptFromDispatch(
           compactLine,
           routed,
           agents,
           defaultAgent,
         );
-        const response = await dispatchSingle(
+        await dispatchSingle(
           agent,
           config.agents[agent]!,
           userPrompt,
-          fullPrompt,
+          getFullPrompt,
           displayPrompt,
         );
         state.pendingImages = [];
-        if (response !== null) {
-          await appendTurn(agent, userPrompt, response);
-        }
       } finally {
         setPreparing(false);
       }
@@ -1782,15 +1968,6 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
               </Text>
             );
           }
-          if (item.kind === "skipped") {
-            return (
-              <SkippedBlock
-                key={item.item.id}
-                lines={item.item.lines}
-                agentColor={item.item.agentColor}
-              />
-            );
-          }
           // Determine if a separator belongs above this turn — and how heavy.
           // None for the very first turn ever, single `─` between turns in the
           // same task, double `═` when the task changed.
@@ -1811,6 +1988,19 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           return (
             <Box key={item.turn.id} flexDirection="column">
               {sepKind !== "none" && <Separator kind={sepKind} label={label} cols={cols} />}
+              {item.turn.routing && (
+                <RoutingNotice
+                  text={item.turn.routing}
+                  agentColor={agentColor}
+                  liveAgents={liveAgentsSet}
+                />
+              )}
+              {item.turn.skipped && (
+                <SkippedBlock
+                  lines={item.turn.skipped.lines}
+                  agentColor={item.turn.skipped.agentColor}
+                />
+              )}
               <UserPrompt prompt={item.turn.prompt} cols={cols} />
               <PanelRow runs={item.turn.runs} tick={0} keyPrefix={item.turn.id} cols={cols} />
             </Box>
@@ -1861,6 +2051,19 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
               {sepKind !== "none" && (
                 <Separator kind={sepKind} label={label} cols={cols} />
               )}
+              {i === 0 && liveRouting && (
+                <RoutingNotice
+                  text={liveRouting}
+                  agentColor={agentColor}
+                  liveAgents={liveAgentsSet}
+                />
+              )}
+              {i === 0 && liveSkipped && (
+                <SkippedBlock
+                  lines={liveSkipped.lines}
+                  agentColor={liveSkipped.agentColor}
+                />
+              )}
               <UserPrompt prompt={g.prompt} cols={cols} />
               <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} cols={cols} />
             </Box>
@@ -1903,7 +2106,8 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           })()}
         </Box>
       )}
-      <Box marginTop={1}>
+      <Box marginTop={1} flexDirection="column">
+        <Text dimColor>{"┄".repeat(Math.max(0, cols))}</Text>
         <MultilineInput
           value={input}
           onChange={setInput}

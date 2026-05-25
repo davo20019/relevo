@@ -113,13 +113,58 @@ export const SLASH_COMMANDS = [
   "/quit",
 ] as const;
 
+// Mirrors task-name validation (src/tasks.ts): alphanumeric start, then
+// alphanumeric / '-' / '_', no path separators. Agent keys end up in transcript
+// paths (transcriptDir()/<agent>/...), so an unconstrained key would let a
+// project-local agents.json escape its directory.
+const AGENT_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,59}$/;
+
+export function isValidAgentKey(name: string): boolean {
+  if (typeof name !== "string") return false;
+  if (name.includes("/") || name.includes("\\")) return false;
+  if (name.startsWith(".")) return false;
+  return AGENT_KEY_RE.test(name);
+}
+
+function sanitizeAgentKeys(
+  raw: AgentConfig,
+  notify?: (msg: string) => void,
+): AgentConfig {
+  const agents = raw?.agents;
+  if (!agents || typeof agents !== "object") return raw;
+  const skipped: string[] = [];
+  const kept: Record<string, AgentSpec> = {};
+  for (const [name, spec] of Object.entries(agents)) {
+    if (isValidAgentKey(name)) kept[name] = spec;
+    else skipped.push(name);
+  }
+  if (skipped.length > 0) {
+    const msg = `ignored invalid agent key(s) in agents.json: ${skipped
+      .map((k) => JSON.stringify(k))
+      .join(", ")} (allowed: alphanumerics, '-', '_', no path separators)`;
+    process.stderr.write(`relevo: ${msg}\n`);
+    notify?.(msg);
+    return { ...raw, agents: kept };
+  }
+  return raw;
+}
+
 export function loadConfig(notify?: (msg: string) => void): AgentConfig {
   if (!existsSync(CONFIG_PATH)) {
     mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
     writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
     notify?.(`created default config at ${CONFIG_PATH}`);
   }
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as AgentConfig;
+  let parsed: AgentConfig;
+  try {
+    parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as AgentConfig;
+  } catch (err) {
+    const msg = `agents.json at ${CONFIG_PATH} is not valid JSON (${(err as Error).message}); falling back to built-in defaults`;
+    process.stderr.write(`relevo: ${msg}\n`);
+    notify?.(msg);
+    return DEFAULT_CONFIG;
+  }
+  return sanitizeAgentKeys(parsed, notify);
 }
 
 export function saveConfig(config: AgentConfig): void {

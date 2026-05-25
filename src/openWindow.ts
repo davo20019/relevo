@@ -5,8 +5,16 @@ import { spawn } from "node:child_process";
 export function openInNewTerminal(cmd: string, cwd: string): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const termProgram = process.env.TERM_PROGRAM ?? "";
+    if (/[\x00-\x08\x0b-\x1f\x7f]/.test(cmd) || cmd.includes("\n")) {
+      resolve({ ok: false, error: "command contains control characters" });
+      return;
+    }
     const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-    const full = `cd ${shellQuote(cwd)} && exec ${cmd}`;
+    // Run cmd via `/bin/sh -c <single-quoted cmd>` so the outer shell that
+    // AppleScript spawns treats cmd as a single argument and cannot be tricked
+    // by an unbalanced quote in cmd. The inner shell still interprets cmd
+    // normally (which is required — cmd is a shell command template).
+    const full = `cd ${shellQuote(cwd)} && exec /bin/sh -c ${shellQuote(cmd)}`;
     const fullEscaped = full.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const script = termProgram.includes("iTerm")
       ? `tell application "iTerm" to create window with default profile command "${fullEscaped}"`

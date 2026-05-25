@@ -1,5 +1,17 @@
 # Contributing
 
+## Security Vulnerabilities
+
+Please **do not** open a public GitHub issue for security problems. Follow
+[SECURITY.md](SECURITY.md): use
+[GitHub private security advisories](https://github.com/davo20019/relevo/security/advisories/new)
+or email **davo20019@gmail.com** with subject `relevo security report`.
+
+## Code Of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+Report conduct concerns to **davo20019@gmail.com**.
+
 ## Local Setup
 
 ```bash

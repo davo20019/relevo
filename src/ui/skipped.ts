@@ -36,10 +36,10 @@ export function buildSkippedBlock(
     if (!firstGroup) row.push({ kind: "text", text: ", " });
     firstGroup = false;
     row.push({ kind: "text", text: reason });
-    for (const name of names) {
-      row.push({ kind: "text", text: " " });
+    names.forEach((name, idx) => {
+      row.push({ kind: "text", text: idx === 0 ? " " : ", " });
       row.push({ kind: "agent", agent: name });
-    }
+    });
   }
   row.push({ kind: "text", text: ")" });
   if (anyDisabled) {

@@ -47,6 +47,9 @@ export type AgentRunState = {
   // so a wedged process looks different from a busy one.
   lastActivityAt: number;
   tokens: TokenUsage | null;
+  filesEdited: string[];
+  toolsUsed: string[];
+  events: { kind: string; payload: string | null }[];
 };
 
 export function newRun(
@@ -79,6 +82,9 @@ export function newRun(
     lastTool: null,
     lastActivityAt: start,
     tokens: null,
+    filesEdited: [],
+    toolsUsed: [],
+    events: [],
     background,
   };
 }
@@ -320,6 +326,9 @@ export function resetRunForRetry(run: AgentRunState, note: string): void {
   run.lastTool = null;
   run.lastActivityAt = run.start;
   run.tokens = null;
+  run.filesEdited = [];
+  run.toolsUsed = [];
+  run.events = [];
 }
 
 // Stream stdout/stderr lines through the parser into run state. Resolves when
@@ -343,6 +352,7 @@ export async function streamToRun(opts: StreamOptions): Promise<StreamResult> {
     const results = Array.isArray(parsed) ? parsed : [parsed];
     for (const { kind, payload } of results) {
       if (kind === null) continue;
+      run.events.push({ kind, payload });
       // Every non-null event counts as activity, even if we don't render it.
       run.lastActivityAt = Date.now();
       if (kind === "message" && payload) {
@@ -355,10 +365,13 @@ export async function streamToRun(opts: StreamOptions): Promise<StreamResult> {
       } else if (kind === "edit") {
         run.nEdits++;
         run.lastEdit = payload;
+        if (payload) run.filesEdited.push(payload);
         if (verbose) run.displayChunks.push(`\`+ edited ${payload}\`\n\n`);
       } else if (kind === "tool") {
         run.nTools++;
         run.lastTool = payload;
+        const tool = payload?.trim().split(/\s+/)[0];
+        if (tool) run.toolsUsed.push(tool);
       } else if (kind === "usage") {
         const u = parseUsagePayload(payload);
         if (u) run.tokens = u;

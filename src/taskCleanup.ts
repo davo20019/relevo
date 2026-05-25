@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { sessionsFile, transcriptDir } from "./paths.js";
 import { clearSessions } from "./sessions.js";
@@ -14,8 +14,20 @@ export function clearTaskContext(): ClearTaskContextResult {
 
   if (existsSync(dir)) {
     for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".md")) continue;
-      unlinkSync(path.join(dir, f));
+      const target = path.join(dir, f);
+      let stat;
+      try {
+        stat = statSync(target);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        rmSync(target, { recursive: true, force: true });
+        transcriptsCleared++;
+        continue;
+      }
+      if (!f.endsWith(".md") && !f.endsWith(".index.jsonl")) continue;
+      unlinkSync(target);
       transcriptsCleared++;
     }
   }

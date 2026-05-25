@@ -18,7 +18,7 @@ describe("buildSkippedBlock / skippedToText", () => {
         pi: "disabled",
       }),
     ).toBe(
-      "@all → 3 skipped (disabled @cursor @opencode @pi) · /agents enable <name>",
+      "@all → 3 skipped (disabled @cursor, @opencode, @pi) · /agents enable <name>",
     );
   });
 
@@ -36,7 +36,7 @@ describe("buildSkippedBlock / skippedToText", () => {
         pi: "not installed",
       }),
     ).toBe(
-      "@all → 3 skipped (disabled @cursor @opencode, not installed @pi) · /agents enable <name>",
+      "@all → 3 skipped (disabled @cursor, @opencode, not installed @pi) · /agents enable <name>",
     );
   });
 
@@ -53,7 +53,7 @@ describe("buildSkippedBlock / skippedToText", () => {
     expect(
       text(["z", "a", "m"], { z: "disabled", a: "disabled", m: "disabled" }),
     ).toBe(
-      "@all → 3 skipped (disabled @z @a @m) · /agents enable <name>",
+      "@all → 3 skipped (disabled @z, @a, @m) · /agents enable <name>",
     );
   });
 

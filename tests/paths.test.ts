@@ -1,11 +1,16 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   configHome,
   currentTask,
+  ensureProjectId,
   expandHome,
+  projectIdFile,
+  projectLocalDir,
+  readProjectId,
+  relevoStateHome,
   resolveConfigPath,
   sessionsFile,
   taskRoot,
@@ -101,18 +106,72 @@ describe("task-scoped paths use the active task", () => {
   });
 
   it("currentTask returns the active task name once set", () => {
+    const home = tempDir();
     setActiveTask("s-20260522-132901");
     expect(currentTask()).toBe("s-20260522-132901");
-    expect(taskRoot()).toBe(path.join(project, ".relay", "tasks", "s-20260522-132901"));
-    expect(transcriptDir()).toBe(
-      path.join(project, ".relay", "tasks", "s-20260522-132901", "transcripts"),
+    expect(taskRoot(undefined, { env: {}, homeDir: home, platform: "darwin" })).toBe(
+      path.join(
+        home,
+        "Library",
+        "Application Support",
+        "relevo",
+        "projects",
+        readProjectId(),
+        "tasks",
+        "s-20260522-132901",
+      ),
     );
-    expect(sessionsFile()).toBe(
-      path.join(project, ".relay", "tasks", "s-20260522-132901", "sessions.json"),
+    expect(transcriptDir({ env: {}, homeDir: home, platform: "darwin" })).toBe(
+      path.join(taskRoot(undefined, { env: {}, homeDir: home, platform: "darwin" }), "transcripts"),
     );
+    expect(sessionsFile({ env: {}, homeDir: home, platform: "darwin" })).toBe(
+      path.join(taskRoot(undefined, { env: {}, homeDir: home, platform: "darwin" }), "sessions.json"),
+    );
+    expect(taskRoot(undefined, { env: {}, homeDir: home, platform: "darwin" }).startsWith(projectLocalDir())).toBe(false);
   });
 
   it("taskRoot accepts an explicit name without activation", () => {
-    expect(taskRoot("other")).toBe(path.join(project, ".relay", "tasks", "other"));
+    const home = tempDir();
+    expect(taskRoot("other", { env: {}, homeDir: home, platform: "darwin" })).toBe(
+      path.join(
+        home,
+        "Library",
+        "Application Support",
+        "relevo",
+        "projects",
+        readProjectId(),
+        "tasks",
+        "other",
+      ),
+    );
+  });
+
+  it("creates project identity locally and reuses it", () => {
+    const id = ensureProjectId();
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(readProjectId()).toBe(id);
+    expect(projectLocalDir()).toBe(path.join(project, ".relay"));
+    expect(projectIdFile()).toBe(path.join(project, ".relay", "project.json"));
+    expect(JSON.parse(readFileSync(projectIdFile(), "utf8"))).toEqual({
+      v: 1,
+      project_id: id,
+    });
+  });
+
+  it("resolves Relevo state home by platform", () => {
+    const home = tempDir();
+    expect(relevoStateHome({ env: {}, homeDir: home, platform: "darwin" })).toBe(
+      path.join(home, "Library", "Application Support", "relevo"),
+    );
+    expect(relevoStateHome({ env: {}, homeDir: home, platform: "linux" })).toBe(
+      path.join(home, ".local", "state", "relevo"),
+    );
+    expect(
+      relevoStateHome({
+        env: { USERPROFILE: home },
+        homeDir: "/ignored",
+        platform: "win32",
+      }),
+    ).toBe(path.join(home, "AppData", "Local", "relevo", "State"));
   });
 });

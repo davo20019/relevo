@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getActiveTask, setActiveTask } from "./tasks.js";
+import { getActiveTask, getActiveTaskStorage, setActiveTask } from "./tasks.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,7 +28,10 @@ type ConfigPathOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
+  platform?: NodeJS.Platform;
 };
+
+export type PathOptions = ConfigPathOptions;
 
 export function expandHome(p: string, homeDir = os.homedir()): string {
   if (p === "~") return homeDir;
@@ -62,8 +66,61 @@ export function projectDir(): string {
   return process.cwd();
 }
 
-export function stateDir(): string {
+export function projectLocalDir(): string {
   return path.join(projectDir(), ".relay");
+}
+
+export function stateDir(): string {
+  return projectLocalDir();
+}
+
+export function projectIdFile(): string {
+  return path.join(projectLocalDir(), "project.json");
+}
+
+export function relevoStateHome(options: PathOptions = {}): string {
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const platform = options.platform ?? process.platform;
+  const explicit = env.RELEVO_STATE_HOME?.trim();
+  if (explicit) return expandHome(explicit, homeDir);
+  if (platform === "darwin") return path.join(homeDir, "Library", "Application Support", "relevo");
+  if (platform === "win32") {
+    const local = env.LOCALAPPDATA?.trim();
+    if (local) return path.join(local, "relevo", "State");
+    const profile = env.USERPROFILE?.trim() || homeDir;
+    return path.join(profile, "AppData", "Local", "relevo", "State");
+  }
+  const xdgState = env.XDG_STATE_HOME?.trim();
+  if (xdgState) return path.join(expandHome(xdgState, homeDir), "relevo");
+  return path.join(homeDir, ".local", "state", "relevo");
+}
+
+export function ensureProjectId(): string {
+  const f = projectIdFile();
+  if (existsSync(f)) {
+    try {
+      const parsed = JSON.parse(readFileSync(f, "utf8")) as { project_id?: unknown };
+      if (typeof parsed.project_id === "string" && parsed.project_id) return parsed.project_id;
+    } catch {
+      // Fall through and rewrite a valid id.
+    }
+  }
+  const id = randomUUID();
+  mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
+  writeFileSync(f, JSON.stringify({ v: 1, project_id: id }, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return id;
+}
+
+export function readProjectId(): string {
+  return ensureProjectId();
+}
+
+export function projectStateRoot(projectId?: string, options: PathOptions = {}): string {
+  return path.join(relevoStateHome(options), "projects", projectId ?? ensureProjectId());
 }
 
 export function currentTask(): string {
@@ -78,21 +135,35 @@ export function setCurrentTask(name: string): void {
   setActiveTask(name);
 }
 
-export function taskRoot(name?: string): string {
-  return path.join(stateDir(), "tasks", name ?? currentTask());
+export function taskRoot(name?: string, options: PathOptions = {}): string {
+  return path.join(projectStateRoot(undefined, options), "tasks", name ?? currentTask());
 }
 
-export function transcriptDir(): string {
-  return path.join(taskRoot(), "transcripts");
+export function legacyTaskRoot(name?: string): string {
+  return path.join(projectLocalDir(), "tasks", name ?? currentTask());
 }
 
-export function sessionsFile(): string {
-  return path.join(taskRoot(), "sessions.json");
+export function transcriptDir(options: PathOptions = {}): string {
+  if (getActiveTaskStorage() === "legacy") {
+    return path.join(legacyTaskRoot(), "transcripts");
+  }
+  return path.join(taskRoot(undefined, options), "transcripts");
+}
+
+export function sessionsFile(options: PathOptions = {}): string {
+  if (getActiveTaskStorage() === "legacy") {
+    return path.join(legacyTaskRoot(), "sessions.json");
+  }
+  return path.join(taskRoot(undefined, options), "sessions.json");
 }
 
 export function historyFile(): string {
   // project-wide so prompts survive task switches
-  return path.join(stateDir(), "history");
+  return path.join(projectStateRoot(), "history");
+}
+
+export function dispatchStatsFile(): string {
+  return path.join(projectStateRoot(), "dispatch-stats.json");
 }
 
 export function projectSettingsFile(): string {
@@ -105,12 +176,15 @@ export function globalSettingsFile(
   return path.join(configHome(options), "settings.json");
 }
 
-export function imagesDir(): string {
-  return path.join(taskRoot(), "images");
+export function imagesDir(options: PathOptions = {}): string {
+  return path.join(taskRoot(undefined, options), "images");
 }
 
-export function ensureTask(name: string): Promise<string> {
-  return mkdir(path.join(taskRoot(name), "transcripts"), { recursive: true }).then(() => name);
+export function ensureTask(name: string, options: PathOptions = {}): Promise<string> {
+  return mkdir(path.join(taskRoot(name, options), "transcripts"), {
+    recursive: true,
+    mode: 0o700,
+  }).then(() => name);
 }
 
 export function maybeMigrateLegacy(): void {
@@ -130,13 +204,13 @@ export function maybeMigrateLegacy(): void {
 }
 
 export async function ensureDirs(): Promise<void> {
-  await mkdir(stateDir(), { recursive: true });
+  await mkdir(stateDir(), { recursive: true, mode: 0o700 });
   maybeMigrateLegacy();
 }
 
 // Synchronous variant used by the bin entry's early --help branch.
 export function ensureDirsSync(): void {
-  mkdirSync(stateDir(), { recursive: true });
+  mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
   maybeMigrateLegacy();
   // Do not create a default task here. New processes intentionally start with
   // no active task; the first dispatch creates one lazily.

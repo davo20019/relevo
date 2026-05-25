@@ -8,9 +8,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-// Per-process task state and naming helpers. Tasks live on disk under
-// .relay/tasks/<name>/ (see paths.ts). The active task for this process is
-// kept here in memory, not in .relay/current, so new terminals start fresh.
+// Per-process task state and naming helpers. Tasks live on disk under the
+// user-private state root, with legacy fallback tasks still under .relay/tasks.
+// The active task for this process is kept here in memory, not on disk, so new
+// terminals start fresh.
 
 export type SlugOptions = { maxWords?: number; maxLen?: number };
 
@@ -128,7 +129,33 @@ export type TaskInfo = {
   lastActivity: Date;
   agents: string[];
   firstPrompt: string;
+  storage: TaskStorage;
 };
+
+export type TaskStorage = "jsonl" | "legacy";
+
+type JsonlIndexEntry = {
+  v?: number;
+  agent?: string;
+  started_at?: string;
+  prompt_preview?: string;
+};
+
+function readFirstJsonlIndexEntry(file: string): JsonlIndexEntry | null {
+  try {
+    const text = readFileSync(file, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parsed = JSON.parse(trimmed) as JsonlIndexEntry;
+      if (parsed.v !== undefined && parsed.v > 1) return null;
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export function listRecentTasks(tasksRoot: string): TaskInfo[] {
   if (!existsSync(tasksRoot)) return [];
@@ -150,14 +177,17 @@ export function listRecentTasks(tasksRoot: string): TaskInfo[] {
     if (existsSync(sessionsPath)) {
       lastMs = Math.max(lastMs, statSync(sessionsPath).mtimeMs);
     }
-    const transcripts = existsSync(transcriptsDir)
+    const legacyTranscripts = existsSync(transcriptsDir)
       ? readdirSync(transcriptsDir)
           .filter((f) => f.endsWith(".md"))
           .sort()
       : [];
-    for (const f of transcripts) {
+    const jsonlIndexes = readdirSync(dir)
+      .filter((f) => f.endsWith(".index.jsonl"))
+      .sort();
+    for (const f of [...legacyTranscripts.map((name) => path.join(transcriptsDir, name)), ...jsonlIndexes.map((name) => path.join(dir, name))]) {
       try {
-        lastMs = Math.max(lastMs, statSync(path.join(transcriptsDir, f)).mtimeMs);
+        lastMs = Math.max(lastMs, statSync(f).mtimeMs);
       } catch {
         // Ignore transcripts deleted during the scan.
       }
@@ -173,10 +203,29 @@ export function listRecentTasks(tasksRoot: string): TaskInfo[] {
         agents = [];
       }
     }
+    const agentSet = new Set(agents);
+    for (const f of legacyTranscripts) agentSet.add(f.replace(/\.md$/, ""));
+    for (const f of jsonlIndexes) agentSet.add(f.replace(/\.index\.jsonl$/, ""));
+    agents = [...agentSet].sort();
 
     let firstPrompt = "";
+    let earliestJsonlPrompt: { at: number; prompt: string } | null = null;
+    for (const f of jsonlIndexes) {
+      const entry = readFirstJsonlIndexEntry(path.join(dir, f));
+      const prompt = entry?.prompt_preview?.trim();
+      if (!prompt) continue;
+      const at = entry?.started_at ? Date.parse(entry.started_at) : Number.POSITIVE_INFINITY;
+      if (!earliestJsonlPrompt || at < earliestJsonlPrompt.at) {
+        earliestJsonlPrompt = {
+          at,
+          prompt: prompt.replace(/\s+/g, " ").slice(0, 80),
+        };
+      }
+    }
+    if (earliestJsonlPrompt) firstPrompt = earliestJsonlPrompt.prompt;
     if (existsSync(transcriptsDir)) {
-      for (const f of transcripts) {
+      for (const f of legacyTranscripts) {
+        if (firstPrompt) break;
         const text = readFileSync(path.join(transcriptsDir, f), "utf8");
         const m = text.match(/### Prompt\n([\s\S]+?)(?=\n### |\n*$)/);
         if (m && m[1]) {
@@ -186,13 +235,20 @@ export function listRecentTasks(tasksRoot: string): TaskInfo[] {
       }
     }
 
-    out.push({ name: entry, lastActivity: new Date(lastMs), agents, firstPrompt });
+    out.push({
+      name: entry,
+      lastActivity: new Date(lastMs),
+      agents,
+      firstPrompt,
+      storage: jsonlIndexes.length > 0 ? "jsonl" : "legacy",
+    });
   }
   out.sort((a, b) => b.lastActivity.getTime() - a.lastActivity.getTime());
   return out;
 }
 
 let activeTask: string | null = null;
+let activeTaskStorage: TaskStorage = "jsonl";
 
 export function getActiveTask(): string | null {
   return activeTask;
@@ -202,6 +258,15 @@ export function setActiveTask(name: string): void {
   activeTask = name;
 }
 
+export function getActiveTaskStorage(): TaskStorage {
+  return activeTaskStorage;
+}
+
+export function setActiveTaskStorage(storage: TaskStorage): void {
+  activeTaskStorage = storage;
+}
+
 export function clearActiveTaskForTest(): void {
   activeTask = null;
+  activeTaskStorage = "jsonl";
 }
