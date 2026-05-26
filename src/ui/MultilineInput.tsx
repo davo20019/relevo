@@ -16,6 +16,8 @@ import {
 
 const PASTE_COMPACT_THRESHOLD = 200;
 const RUNNING_INPUT_PLACEHOLDER = "running · next prompt will queue";
+const INPUT_PREFIX_WIDTH = 2;
+const MAX_VISIBLE_INPUT_ROWS = 3;
 
 type Props = {
   value: string;
@@ -25,6 +27,7 @@ type Props = {
   slashCommands: readonly string[];
   agents: readonly string[];
   history: readonly string[];
+  cols: number;
 };
 
 // A multi-line input with a visible cursor, emacs-style shortcuts, and an
@@ -49,6 +52,7 @@ export function MultilineInput({
   slashCommands,
   agents,
   history,
+  cols,
 }: Props) {
   const [cursor, setCursor] = useState(value.length);
   const [selected, setSelected] = useState(0);
@@ -352,8 +356,15 @@ export function MultilineInput({
         <Text color="cyan" bold>
           ❯{" "}
         </Text>
-        <Box flexDirection="column">
-          {renderBuffer(value, safeCursor, disabled, 0)}
+        <Box flexDirection="column" width={Math.max(1, cols - INPUT_PREFIX_WIDTH)}>
+          {renderBuffer(
+            value,
+            safeCursor,
+            disabled,
+            0,
+            Math.max(1, cols - INPUT_PREFIX_WIDTH - 1),
+            MAX_VISIBLE_INPUT_ROWS,
+          )}
         </Box>
       </Box>
       {acOpen && (
@@ -499,33 +510,115 @@ export function formatRunningInputPlaceholder(_frame: number): string {
   return RUNNING_INPUT_PLACEHOLDER;
 }
 
-function renderBuffer(value: string, cursor: number, disabled: boolean, runningFrame: number) {
+export type InputLayoutRow = {
+  text: string;
+  start: number;
+  end: number;
+};
+
+export function layoutInputRows(
+  value: string,
+  cursor: number,
+  {
+    width,
+    maxRows,
+  }: {
+    width: number;
+    maxRows: number;
+  },
+): { rows: InputLayoutRow[]; cursorRow: number; cursorCol: number } {
+  const safeWidth = Math.max(1, width);
+  const safeMaxRows = Math.max(1, maxRows);
+  const safeCursor = Math.min(Math.max(cursor, 0), value.length);
+  const visualRows = buildVisualRows(value, safeWidth);
+  let cursorVisualRow = visualRows.length - 1;
+
+  for (let i = 0; i < visualRows.length; i++) {
+    const row = visualRows[i]!;
+    const next = visualRows[i + 1];
+    if (safeCursor < row.start || safeCursor > row.end) continue;
+    if (safeCursor === row.end && next?.start === safeCursor) continue;
+    cursorVisualRow = i;
+    break;
+  }
+
+  const firstVisible = Math.min(
+    Math.max(0, cursorVisualRow - safeMaxRows + 1),
+    Math.max(0, visualRows.length - safeMaxRows),
+  );
+  const rows = visualRows.slice(firstVisible, firstVisible + safeMaxRows);
+
+  const visibleCursorRow = Math.min(
+    Math.max(0, cursorVisualRow - firstVisible),
+    rows.length - 1,
+  );
+  const cursorRow = rows[visibleCursorRow]!;
+  const cursorCol = Math.min(
+    Math.max(0, safeCursor - cursorRow.start),
+    cursorRow.text.length,
+  );
+
+  return { rows, cursorRow: visibleCursorRow, cursorCol };
+}
+
+function buildVisualRows(value: string, width: number): InputLayoutRow[] {
+  if (value.length === 0) return [{ text: "", start: 0, end: 0 }];
+
+  const rows: InputLayoutRow[] = [];
+  const logicalLines = value.split("\n");
+  let lineStartIdx = 0;
+
+  logicalLines.forEach((line, lineIdx) => {
+    if (line.length === 0) {
+      rows.push({ text: "", start: lineStartIdx, end: lineStartIdx });
+    } else {
+      for (let offset = 0; offset < line.length; offset += width) {
+        const text = line.slice(offset, offset + width);
+        rows.push({
+          text,
+          start: lineStartIdx + offset,
+          end: lineStartIdx + offset + text.length,
+        });
+      }
+    }
+
+    if (lineIdx < logicalLines.length - 1) {
+      lineStartIdx += line.length + 1;
+    }
+  });
+
+  return rows;
+}
+
+function renderBuffer(
+  value: string,
+  cursor: number,
+  disabled: boolean,
+  runningFrame: number,
+  width: number,
+  maxRows: number,
+) {
   // While a dispatch is in flight and the buffer is empty, show a dim
   // queueing placeholder so the user knows new input is still accepted.
   // Once they start typing, the placeholder yields to their text (which the
   // queue hint above the input labels as "queued").
   if (disabled && value.length === 0) {
-    return <Text dimColor>{formatRunningInputPlaceholder(runningFrame)}</Text>;
-  }
-  const lines = value.length === 0 ? [""] : value.split("\n");
-
-  let lineIdx = 0;
-  let col = cursor;
-  for (let i = 0; i < lines.length; i++) {
-    if (col <= lines[i]!.length) {
-      lineIdx = i;
-      break;
-    }
-    col -= lines[i]!.length + 1;
+    return [
+      <Text key="placeholder" dimColor>
+        {formatRunningInputPlaceholder(runningFrame)}
+      </Text>,
+    ];
   }
 
-  return lines.map((line, idx) => {
-    if (idx !== lineIdx) {
-      return <Text key={idx}>{line || " "}</Text>;
+  const layout = layoutInputRows(value, cursor, { width, maxRows });
+
+  return layout.rows.map((row, idx) => {
+    if (idx !== layout.cursorRow) {
+      return <Text key={idx}>{row.text || " "}</Text>;
     }
-    const pre = line.slice(0, col);
-    const at = line.slice(col, col + 1) || " ";
-    const post = line.slice(col + 1);
+    const pre = row.text.slice(0, layout.cursorCol);
+    const at = row.text.slice(layout.cursorCol, layout.cursorCol + 1) || " ";
+    const post = row.text.slice(layout.cursorCol + 1);
     return (
       <Text key={idx}>
         {pre}

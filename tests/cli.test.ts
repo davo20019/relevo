@@ -21,6 +21,7 @@ describe("CLI contract", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("relevo");
     expect(r.stdout).toContain("@<agent> <prompt>");
+    expect(r.stdout).toContain("!<command>");
     expect(r.stdout + r.stderr).not.toContain("at Object.");
   });
 

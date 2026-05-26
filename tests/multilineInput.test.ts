@@ -6,6 +6,7 @@ import {
   expandPastedPlaceholders,
   findPlaceholderAtCursor,
   formatRunningInputPlaceholder,
+  layoutInputRows,
   pasteInputIsActive,
 } from "../src/ui/MultilineInput.js";
 
@@ -143,6 +144,38 @@ describe("pasteInputIsActive", () => {
 describe("formatRunningInputPlaceholder", () => {
   it("tells the user the next prompt will queue while agents are running", () => {
     expect(formatRunningInputPlaceholder(0)).toBe("running · next prompt will queue");
+  });
+});
+
+describe("layoutInputRows", () => {
+  it("keeps the rendered input to a fixed number of visual rows", () => {
+    const layout = layoutInputRows("one\ntwo\nthree\nfour", "one\ntwo\nthree\nfour".length, {
+      width: 20,
+      maxRows: 3,
+    });
+
+    expect(layout.rows.map((r) => r.text)).toEqual(["two", "three", "four"]);
+    expect(layout.cursorRow).toBe(2);
+    expect(layout.cursorCol).toBe(4);
+  });
+
+  it("wraps long logical lines before choosing the visible input window", () => {
+    const layout = layoutInputRows("abcdefghijkl", "abcdefghijkl".length, {
+      width: 5,
+      maxRows: 2,
+    });
+
+    expect(layout.rows.map((r) => r.text)).toEqual(["fghij", "kl"]);
+    expect(layout.cursorRow).toBe(1);
+    expect(layout.cursorCol).toBe(2);
+  });
+
+  it("keeps short input to its natural height by default", () => {
+    const layout = layoutInputRows("hi", 2, { width: 20, maxRows: 3 });
+
+    expect(layout.rows.map((r) => r.text)).toEqual(["hi"]);
+    expect(layout.cursorRow).toBe(0);
+    expect(layout.cursorCol).toBe(2);
   });
 });
 

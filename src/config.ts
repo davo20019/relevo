@@ -119,10 +119,16 @@ export const SLASH_COMMANDS = [
 // project-local agents.json escape its directory.
 const AGENT_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,59}$/;
 
+// Reserved transcript namespaces (e.g. `local` for the bang-command lane) must
+// not collide with a configured agent key. Kept in sync with
+// RESERVED_TRANSCRIPT_AGENTS in src/routing.ts.
+const RESERVED_AGENT_KEYS = new Set(["local"]);
+
 export function isValidAgentKey(name: string): boolean {
   if (typeof name !== "string") return false;
   if (name.includes("/") || name.includes("\\")) return false;
   if (name.startsWith(".")) return false;
+  if (RESERVED_AGENT_KEYS.has(name.toLowerCase())) return false;
   return AGENT_KEY_RE.test(name);
 }
 
@@ -141,7 +147,7 @@ function sanitizeAgentKeys(
   if (skipped.length > 0) {
     const msg = `ignored invalid agent key(s) in agents.json: ${skipped
       .map((k) => JSON.stringify(k))
-      .join(", ")} (allowed: alphanumerics, '-', '_', no path separators)`;
+      .join(", ")} (allowed: alphanumerics, '-', '_', no path separators; reserved: local)`;
     process.stderr.write(`relevo: ${msg}\n`);
     notify?.(msg);
     return { ...raw, agents: kept };

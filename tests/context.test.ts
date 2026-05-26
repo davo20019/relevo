@@ -78,6 +78,26 @@ describe("buildContext", () => {
     expect(ctx).toBe("");
   });
 
+  it("includes reserved @local transcript context when requested", () => {
+    writeTranscript("local", [
+      turn(
+        "2026-01-02T00:00:00",
+        "!npm test",
+        "$ npm test\ncwd: /proj\nshell: /bin/bash\n\nstderr:\nboom\n\nexit 1 after 50ms",
+      ),
+    ]);
+    const ctx = buildAgentPrompt(
+      "claude",
+      { claude },
+      3,
+      "debug this",
+      { peerAgents: ["local"] },
+    );
+    expect(ctx).toContain("--- Recent activity from @local ---");
+    expect(ctx).toContain("!npm test");
+    expect(ctx).toContain("boom");
+  });
+
   it("includes only requested peer turns", () => {
     writeTranscript("claude", [
       turn("2026-01-01T00:00:00", "old prompt", "old response"),

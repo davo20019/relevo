@@ -38,8 +38,10 @@ import {
   type TurnStatus,
 } from "../transcriptStore.js";
 import { existsSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
+import { runLocalCommand, type LocalCommandResult } from "../localCommand.js";
 import {
   ALL_TOKEN,
   expandAll,
@@ -204,6 +206,31 @@ function statusFromRun(run: AgentRunState): TurnStatus {
   return run.finalStatus === "done" ? "completed" : "failed";
 }
 
+function formatLocalCommandResponse(result: LocalCommandResult): string {
+  const parts = [
+    `$ ${result.command}`,
+    `cwd: ${result.cwd}`,
+    `shell: ${result.shell}`,
+    "",
+  ];
+  if (result.stdout.trim()) {
+    parts.push(
+      result.stdoutTruncated ? "stdout (last 128 KiB, truncated):" : "stdout:",
+      result.stdout.trimEnd(),
+      "",
+    );
+  }
+  if (result.stderr.trim()) {
+    parts.push(
+      result.stderrTruncated ? "stderr (last 128 KiB, truncated):" : "stderr:",
+      result.stderr.trimEnd(),
+      "",
+    );
+  }
+  parts.push(`exit ${result.exitCode} after ${result.durationMs}ms`);
+  return parts.join("\n");
+}
+
 export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   const { exit } = useApp();
   const [config, setConfig] = useState<AgentConfig>(initialConfig);
@@ -226,6 +253,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   // what triggers re-renders / effects.
   const [inFlight, setInFlight] = useState<Set<string>>(() => new Set());
   const inFlightRef = useRef<Set<string>>(new Set());
+  // Holds the AbortController for an in-flight `!<command>` so the Esc handler
+  // can cancel it alongside agent runs.
+  const activeLocalRef = useRef<AbortController | null>(null);
   const [queuedPreview, setQueuedPreview] = useState<string[]>([]);
   const [queueVersion, setQueueVersion] = useState(0);
   // Synchronous counter for "a queue-branch submission is mid-flight." Set
@@ -341,14 +371,24 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
   // We remember that a resize happened and replay it once the run ends.
   const { stdout } = useStdout();
   const [cols, setCols] = useState<number>(stdout?.columns ?? 80);
+  // Bumped on every resize so the <Static> key always changes and remounts,
+  // even when stdout.columns is unchanged (e.g. a height-only resize). Without
+  // this, a same-width resize would clear the visible screen without re-emitting
+  // any committed turns, leaving the user with an empty viewport.
+  const [resizeSeq, setResizeSeq] = useState(0);
   const activeRunCountRef = useRef(0);
   const deferredResizeRef = useRef(false);
   useEffect(() => {
     activeRunCountRef.current = activeRuns.length;
     if (activeRuns.length === 0 && deferredResizeRef.current && stdout) {
       deferredResizeRef.current = false;
-      stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      // \x1b[2J clears the visible screen; \x1b[H homes the cursor. We
+      // deliberately do NOT send \x1b[3J — clearing the terminal scrollback
+      // destroys anything that scrolled above the viewport and the user can't
+      // recover it, even after Static remounts.
+      stdout.write("\x1b[2J\x1b[H");
       setCols(stdout.columns ?? 80);
+      setResizeSeq((n) => n + 1);
     }
   }, [activeRuns.length, stdout]);
   useEffect(() => {
@@ -358,8 +398,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         deferredResizeRef.current = true;
         return;
       }
-      stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      stdout.write("\x1b[2J\x1b[H");
       setCols(stdout.columns ?? 80);
+      setResizeSeq((n) => n + 1);
     };
     stdout.on("resize", update);
     return () => {
@@ -441,6 +482,9 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         .map((r) => (r.spawn && "proc" in r.spawn ? r.spawn.proc : null))
         .filter((p): p is NonNullable<typeof p> => Boolean(p));
       cancelRuns(activeRuns, procs);
+    }
+    if (activeLocalRef.current) {
+      activeLocalRef.current.abort();
     }
   });
 
@@ -875,6 +919,97 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       log(`started task: ${finalName}`);
     },
     [log],
+  );
+
+  const runLocalFromInput = useCallback(
+    async (command: string): Promise<void> => {
+      const trimmed = command.trim();
+      if (!trimmed) {
+        log("usage: !<command>", "warn");
+        return;
+      }
+
+      await ensureActiveTask();
+      const runId = randomUUID();
+      const controller = new AbortController();
+      activeLocalRef.current = controller;
+      log(`local $ ${trimmed}`);
+
+      let result: LocalCommandResult;
+      try {
+        result = await runLocalCommand(
+          trimmed,
+          {
+            stdout: (chunk) => {
+              for (const line of chunk.replace(/\n$/, "").split(/\n/)) {
+                if (line) log(line);
+              }
+            },
+            stderr: (chunk) => {
+              for (const line of chunk.replace(/\n$/, "").split(/\n/)) {
+                if (line) log(line, "warn");
+              }
+            },
+          },
+          { signal: controller.signal },
+        );
+      } catch (e: any) {
+        log(`local command failed to start: ${e?.message ?? e}`, "error");
+        await appendStructuredTurn("local", {
+          runId,
+          status: "failed",
+          userPrompt: `!${trimmed}`,
+          response: `failed to start local command: ${e?.message ?? e}`,
+          toolsUsed: ["local-shell"],
+          events: [{ kind: "local_command_start_error", payload: String(e?.message ?? e) }],
+          agentSpec: null,
+        });
+        return;
+      } finally {
+        if (activeLocalRef.current === controller) activeLocalRef.current = null;
+      }
+
+      const status: TurnStatus = result.cancelled
+        ? "cancelled"
+        : result.exitCode === 0
+          ? "completed"
+          : "failed";
+      const response = formatLocalCommandResponse(result);
+      await appendStructuredTurn("local", {
+        runId,
+        status,
+        userPrompt: `!${trimmed}`,
+        response,
+        toolsUsed: ["local-shell"],
+        events: [
+          {
+            kind: "local_command",
+            payload: JSON.stringify({
+              command: result.command,
+              cwd: result.cwd,
+              shell: result.shell,
+              exitCode: result.exitCode,
+              signal: result.signal,
+              durationMs: result.durationMs,
+              cancelled: result.cancelled,
+              stdoutTruncated: result.stdoutTruncated,
+              stderrTruncated: result.stderrTruncated,
+            }),
+          },
+        ],
+        agentSpec: null,
+      });
+
+      if (result.cancelled) {
+        log(`local cancelled after ${result.durationMs}ms`, "warn");
+      } else if (result.exitCode !== 0) {
+        log(
+          `local exited ${result.exitCode} - ask an agent with @claude @local debug the failure`,
+          "warn",
+        );
+      }
+    },
+    [ensureActiveTask, log],
   );
 
   const handleSlash = useCallback(
@@ -1582,6 +1717,13 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       }
       const parsed = parseLine(routed);
       if (parsed.kind === "empty") return null;
+      if (parsed.kind === "local") {
+        log(
+          "can't queue a local command while a dispatch is in flight. press Esc to cancel the run first.",
+          "warn",
+        );
+        return null;
+      }
       if (parsed.kind === "command") {
         // Slash commands are rejected upstream when busy; if we got here,
         // the caller should run handleSlash itself. Queue path doesn't reach.
@@ -1650,6 +1792,28 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         prev[prev.length - 1] === compactLine ? prev : [...prev, compactLine],
       );
       appendPromptHistory(compactLine);
+      const earlyParsed = parseLine(expandedLine);
+      if (earlyParsed.kind === "local") {
+        if (
+          inFlightRef.current.size > 0 ||
+          preparing ||
+          queueBranchActiveRef.current > 0
+        ) {
+          log(
+            "can't run a local command while a dispatch is in flight. press Esc to cancel the run first.",
+            "warn",
+          );
+          return;
+        }
+        setInput("");
+        setPreparing(true);
+        try {
+          await runLocalFromInput(earlyParsed.command);
+        } finally {
+          setPreparing(false);
+        }
+        return;
+      }
       const decision = classifySubmit(
         expandedLine,
         inFlightRef.current.size > 0 || preparing || queueBranchActiveRef.current > 0,
@@ -1794,6 +1958,11 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
         }
         const parsed = parseLine(routed);
         if (parsed.kind === "empty") return;
+        if (parsed.kind === "local") {
+          // Defensive: normal local handling already returned early in handleSubmit.
+          await runLocalFromInput(parsed.command);
+          return;
+        }
         if (parsed.kind === "command") {
           const keep = await handleSlash(parsed.content);
           if (!keep) exit();
@@ -1896,6 +2065,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
       preparing,
       pushSkipped,
       refreshQueuedPreview,
+      runLocalFromInput,
     ],
   );
 
@@ -1943,7 +2113,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
 
   return (
     <Box flexDirection="column">
-      <Static key={`static-${cols}`} items={history}>
+      <Static key={`static-${cols}-${resizeSeq}`} items={history}>
         {(item, index) => {
           if (item.kind === "log") {
             const style = LEVEL_STYLE[item.line.level];
@@ -2035,6 +2205,60 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           }
         }
         const currentTask = safeCurrentTask();
+        // Two staggered live dispatches (each with their own prompt) go
+        // side-by-side when the terminal is wide enough so the parallelism is
+        // visible at a glance — same rule as PanelRow's intra-batch layout,
+        // just applied one level up. 1 group renders as today; 3+ stack
+        // vertically (matching the PanelRow fallback — past two columns each
+        // pane is too narrow to read and the elapsed chip in each panel header
+        // already carries "running in parallel" on its own).
+        const sideBySideGroups = groups.length === 2 && cols >= 120;
+        if (sideBySideGroups) {
+          const startMs = groups[0]!.runs[0]!.start;
+          const sepKind: "none" | "single" | "double" = !lastCommittedTurn
+            ? "none"
+            : lastCommittedTurn.task !== currentTask
+              ? "double"
+              : "single";
+          const label = formatClockLabel({ at: new Date(startMs), task: currentTask });
+          // -2: one column for the inter-group gutter (marginRight on the
+          // first group) plus one for the same right-edge auto-wrap margin
+          // PanelRow uses for its bottom-border safety.
+          const halfWidth = Math.floor((cols - 2) / 2);
+          return (
+            <Box flexDirection="column">
+              {sepKind !== "none" && (
+                <Separator kind={sepKind} label={label} cols={cols} />
+              )}
+              {liveRouting && (
+                <RoutingNotice
+                  text={liveRouting}
+                  agentColor={agentColor}
+                  liveAgents={liveAgentsSet}
+                />
+              )}
+              {liveSkipped && (
+                <SkippedBlock
+                  lines={liveSkipped.lines}
+                  agentColor={liveSkipped.agentColor}
+                />
+              )}
+              <Box flexDirection="row">
+                {groups.map((g, i) => (
+                  <Box
+                    key={`live-group-${i}`}
+                    flexDirection="column"
+                    width={halfWidth}
+                    marginRight={i === 0 ? 1 : 0}
+                  >
+                    <UserPrompt prompt={g.prompt} cols={halfWidth} />
+                    <PanelRow runs={g.runs} tick={tick} keyPrefix={`live-${i}`} cols={halfWidth} />
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          );
+        }
         return groups.map((g, i) => {
           const startMs = g.runs[0]!.start;
           const prevTask =
@@ -2116,6 +2340,7 @@ export function App({ initialConfig }: { initialConfig: AgentConfig }) {
           slashCommands={SLASH_COMMANDS}
           agents={agents}
           history={promptHistory}
+          cols={cols}
         />
       </Box>
       <BottomToolbar

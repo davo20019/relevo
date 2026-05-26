@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendStructuredTurn,
   appendTurn,
   formatTurnsAsLegacyMarkdown,
   readDependencyTurn,
@@ -209,5 +210,37 @@ describe("transcriptStore", () => {
       /invalid transcript turn id/,
     );
     expect(() => transcriptTurnPath("codex", "20260524T120311Z-a4f82c1d")).not.toThrow();
+  });
+
+  it("persists local command turns under the local transcript", async () => {
+    await appendStructuredTurn("local", {
+      runId: "local-run-1",
+      status: "failed",
+      userPrompt: "!npm test",
+      response: "$ npm test\n\nstderr\n\nexit 1 after 123ms",
+      toolsUsed: ["local-shell"],
+      events: [
+        {
+          kind: "local_command",
+          payload: JSON.stringify({ command: "npm test", exitCode: 1 }),
+        },
+      ],
+      agentSpec: null,
+    });
+
+    const [entry] = await readIndex("local");
+    expect(entry).toMatchObject({
+      run_id: "local-run-1",
+      status: "failed",
+      prompt_preview: "!npm test",
+      tools_used: ["local-shell"],
+    });
+
+    const turn = await readTurn("local", entry!.turn_id);
+    expect(turn.agent_spec).toBeNull();
+    expect(turn.events[0]).toEqual({
+      kind: "local_command",
+      payload: JSON.stringify({ command: "npm test", exitCode: 1 }),
+    });
   });
 });

@@ -37,6 +37,12 @@ describe("isValidAgentKey", () => {
     expect(isValidAgentKey("a$(b)")).toBe(false);
     expect(isValidAgentKey("")).toBe(false);
   });
+
+  it("reserves local as an internal transcript namespace", async () => {
+    const { isValidAgentKey } = await import("../src/config.js");
+    expect(isValidAgentKey("local")).toBe(false);
+    expect(isValidAgentKey("Local")).toBe(false);
+  });
 });
 
 describe("loadConfig", () => {

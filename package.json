@@ -1,6 +1,6 @@
 {
   "name": "relevo",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "A multi-agent coding workspace for coordinating local AI coding CLIs with shared context and native session resume.",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "main": "dist/cli.js",
   "files": [
     "dist",
+    "assets",
     "agents.json",
     "README.md",
     "CONTRIBUTING.md",

@@ -9,6 +9,8 @@ you can drive Claude Code, Codex, OpenCode, Cursor CLI, Antigravity (`agy`), and
 similar tools from one terminal. Each agent's transcript is fed back to the
 others as context, and you can fan a prompt out to several agents in parallel.
 
+![Relevo usage demo](assets/relevo-demo.gif)
+
 ## Why
 
 You finish a task with one agent, want another to review it, take the feedback
@@ -74,6 +76,34 @@ Edit `~/.config/relevo/agents.json`, a project-local `./agents.json`, or
 `RELEVO_CONFIG` to run agents in a more cautious mode. Per-flag notes and
 revert examples are in [Default Agent Notes](#default-agent-notes).
 
+## Vendor terms
+
+Relevo shells out to each vendor's official CLI under your existing login —
+it does not extract OAuth tokens or proxy API calls. You are responsible for
+complying with each vendor's terms when you drive their CLI from Relevo.
+
+- **Claude Code** ([terms](https://www.anthropic.com/legal/consumer-terms)) —
+  Anthropic's docs explicitly bless headless/scripted use of the `claude`
+  binary. Token-extracting wrappers (OpenClaw, Roo Code) were blocked in
+  Jan 2026; shelling out to the official binary is the supported pattern.
+- **Cursor CLI** ([terms](https://cursor.com/terms-of-service)) — no
+  restrictions on automation or headless use. Don't resell the service or
+  train a competing model on its output.
+- **Codex** ([terms](https://openai.com/policies/terms-of-use/)) —
+  `codex exec` is documented for non-interactive use. OpenAI has **not**
+  explicitly confirmed third-party wrappers are permitted under a **ChatGPT
+  subscription**
+  ([discussion](https://github.com/openai/codex/discussions/8338)); using
+  an OpenAI **API key** avoids that ambiguity.
+- **Antigravity (`agy`)** ([terms](https://antigravity.google/terms)) —
+  Google's terms forbid "third party software, tools, or services to access
+  the Service," and they have suspended subscribers over OAuth-proxy tools.
+  Relevo only shells out to the official `agy` binary, but Google's
+  enforcement here has been aggressive; if you rely on Antigravity, weigh
+  the risk and consider Vertex/AI Studio API-key auth.
+- **pi** — MIT-licensed, no restrictions on wrapping.
+- **opencode** — open source; check its own license.
+
 ## Quickstart
 
 ```bash
@@ -103,6 +133,8 @@ npm run dev   # or: npm run build && npm start
 > @codex review spec.md
 > @claude @codex review the latest diff
 > review the latest diff @cursor
+> !npm test
+> @claude @local debug the failure
 > /tail codex 2
 > /open claude
 > /exit
@@ -149,6 +181,19 @@ npm run dev   # or: npm run build && npm start
 - Claude, Codex, Cursor, and agy have native session support by default. They
   keep their own conversation memory across turns; transcript replay is the
   fallback for other agents.
+- `!<command>` runs a local shell command in the project directory without
+  invoking an agent. Each `!` is a one-shot `bash -lc`: state from `cd`,
+  `export`, `source`, virtualenv activation, or backgrounded jobs does **not**
+  persist into the next `!` call. Chain with `&&` when state needs to span
+  (e.g. `!cd src && python script.py`), or open a real terminal for iterative
+  shell work. Output is captured into the task transcript under `@local`, so a
+  later prompt like `@claude @local debug the failure` gives the agent the
+  exact command, exit code, and stderr. Press Esc to cancel a running local
+  command (SIGTERM to the process group, then SIGKILL after 2s). Local
+  commands can't run while an agent dispatch is in flight; cancel the dispatch
+  first. Queued images from `/image` stay queued for the next agent dispatch
+  — they are not attached to local commands. Captured stdout/stderr are each
+  capped to the last 128 KiB in the transcript; live output streams in full.
 
 ## Task Workspace Model
 

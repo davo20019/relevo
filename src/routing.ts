@@ -12,6 +12,18 @@ const MULTI_CONNECTOR = /^(?:and|&|\+|,|;)/i;
 
 export type Pending = { pendingPrompt: string | null };
 
+// Reserved peer-context namespaces that are not configured agents but can be
+// mentioned in prompts to include their transcript context (e.g. `@local`
+// pulls the most recent local shell command's output into an agent's context).
+export const RESERVED_TRANSCRIPT_AGENTS = ["local"] as const;
+
+function isKnownPeerAgent(name: string, knownAgents: readonly string[]): boolean {
+  return (
+    knownAgents.includes(name) ||
+    (RESERVED_TRANSCRIPT_AGENTS as readonly string[]).includes(name)
+  );
+}
+
 export function expandAll(line: string, knownAgents: string[]): string {
   if (!line) return line;
   const trimmed = line.trimStart();
@@ -89,6 +101,10 @@ export function parseMulti(
 
 export function smartRoute(line: string, knownAgents: string[]): string {
   if (!line) return line;
+  // Bang lines must bypass smartRoute's @mention rewriting. Without this,
+  // `!echo "@claude is great"` would be rewritten to `@claude echo "is great"`
+  // before parseLine ever saw it. Not redundant defense-in-depth — load-bearing.
+  if (line.trimStart().startsWith("!")) return line;
   if (isKnownCommand(line)) return line;
   if (line.startsWith("@")) {
     const head = AGENT_TOKEN.exec(line);
@@ -114,12 +130,14 @@ export function smartRoute(line: string, knownAgents: string[]): string {
 export type ParsedLine =
   | { kind: "empty" }
   | { kind: "command"; content: string }
+  | { kind: "local"; command: string }
   | { kind: "agent"; agent: string; content: string }
   | { kind: "untagged"; content: string };
 
 export function parseLine(line: string): ParsedLine {
   const t = line.trim();
   if (!t) return { kind: "empty" };
+  if (t.startsWith("!")) return { kind: "local", command: t.slice(1).trimStart() };
   if (isKnownCommand(t)) return { kind: "command", content: t };
   if (t.startsWith("@")) {
     const m = AGENT_TOKEN.exec(t);
@@ -134,6 +152,10 @@ export function prepareDispatchLine(
   state: Pending,
   defaultAgent: string | null = null,
 ): string | null {
+  if (line.trimStart().startsWith("!")) {
+    state.pendingPrompt = null;
+    return line.trim();
+  }
   const routed = smartRoute(line, knownAgents);
   const parsed = parseLine(routed);
   if (parsed.kind === "untagged") {
@@ -177,7 +199,7 @@ export function requestedPeerAgents(
   while ((m = ANY_MENTION.exec(content))) {
     const name = m[1]!;
     if (name === targetAgent) continue;
-    if (!knownAgents.includes(name)) continue;
+    if (!isKnownPeerAgent(name, knownAgents)) continue;
     if (!out.includes(name)) out.push(name);
   }
   return out;

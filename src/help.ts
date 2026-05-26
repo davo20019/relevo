@@ -31,6 +31,8 @@ Usage:
   @<a1> @<a2> ... <prompt>     dispatch to several agents in parallel (each in its own panel)
   @all <prompt>                dispatch to every enabled, available CLI agent in parallel
   @claude review @codex ...    include @codex's latest turn as explicit handoff context
+  !<command>                   run a local shell command in this project without invoking an agent
+                               (output is recorded as @local; use @local to share with agents)
   /agents                      list configured agents and availability
   /agents enable <agent>       include an agent in @all again
   /agents disable <agent>      skip an agent from @all

@@ -184,13 +184,17 @@ export function AgentPanel({
   );
 }
 
-// Idle threshold (s) before we flag the run as quiet. Two minutes is long
-// enough to avoid flapping for normal tool latency but short enough that a
-// genuinely wedged process gets surfaced before the user has to wonder.
+// Quiet threshold (s) before we flag a running agent as silent. Two minutes is
+// long enough to avoid flapping for normal tool latency but short enough that
+// a genuinely wedged process gets surfaced before the user has to wonder.
 const IDLE_QUIET_SECONDS = 120;
 
 export function formatWaitingStatus(elapsed: number): string {
   return DOT_FRAMES[Math.floor(elapsed * 3) % DOT_FRAMES.length]!;
+}
+
+export function formatQuietStatus(idle: number): string {
+  return ` · silent ${idle.toFixed(0)}s`;
 }
 
 function WaitingLine({
@@ -212,7 +216,7 @@ function WaitingLine({
       <Text dimColor>
         {waitingStatus}
         {idle >= IDLE_QUIET_SECONDS && (
-          <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
+          <Text color="yellow">{formatQuietStatus(idle)}</Text>
         )}
       </Text>
     );
@@ -228,7 +232,7 @@ function WaitingLine({
       <Text dimColor>
         {waitingStatus}
         {idle >= IDLE_QUIET_SECONDS && (
-          <Text color="yellow"> · idle {idle.toFixed(0)}s</Text>
+          <Text color="yellow">{formatQuietStatus(idle)}</Text>
         )}
       </Text>
     </>

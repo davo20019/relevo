@@ -155,6 +155,28 @@ describe("parseLine", () => {
       content: "do X",
     });
   });
+
+  it("parses bang-prefixed input as a local command", () => {
+    expect(parseLine("!ls src")).toEqual({ kind: "local", command: "ls src" });
+  });
+
+  it("trims whitespace after the bang local-command prefix", () => {
+    expect(parseLine("!   pwd")).toEqual({ kind: "local", command: "pwd" });
+  });
+
+  it("treats a bare bang as empty local command content", () => {
+    expect(parseLine("!")).toEqual({ kind: "local", command: "" });
+  });
+
+  // Defense-in-depth: bang input is handled in App.tsx's handleSubmit *before*
+  // prepareDispatchLine is called, so this path is not exercised at runtime.
+  // The test exists so a future change to dispatch routing cannot silently turn
+  // "!ls" into a default-agent prompt or capture it as pendingPrompt.
+  it("does not route bang input to a default agent", () => {
+    const state = { pendingPrompt: null as string | null };
+    expect(prepareDispatchLine("!ls", ["claude"], state, "claude")).toBe("!ls");
+    expect(state.pendingPrompt).toBeNull();
+  });
 });
 
 describe("requestedPeerAgents", () => {
@@ -176,5 +198,10 @@ describe("requestedPeerAgents", () => {
     expect(requestedPeerAgents("continue @claude and review @codex", "claude", ["claude", "codex"])).toEqual([
       "codex",
     ]);
+  });
+
+  it("treats @local as a reserved transcript peer", () => {
+    expect(requestedPeerAgents("debug @local output", "claude", ["claude", "codex"]))
+      .toEqual(["local"]);
   });
 });

@@ -2,6 +2,7 @@ import path from "node:path";
 import type { AgentSpec } from "./config.js";
 import type { ContextCompactionConfig } from "./compaction.js";
 import { compactContextBlock } from "./compaction.js";
+import { RESERVED_TRANSCRIPT_AGENTS } from "./routing.js";
 import { loadSessions } from "./sessions.js";
 import { readLastTurns } from "./transcripts.js";
 import {
@@ -48,6 +49,14 @@ export function buildContext(
       const label = name === targetAgent ? "your own prior turns" : `@${name}`;
       const compacted = compactContextBlock(recent, options.contextCompaction);
       chunks.push(`--- Recent activity from ${label} ---\n${compacted}`);
+    }
+  }
+  for (const name of RESERVED_TRANSCRIPT_AGENTS) {
+    if (!requestedPeers.has(name)) continue;
+    const recent = readLastTurns(name, PEER_CONTEXT_TURNS);
+    if (recent.trim()) {
+      const compacted = compactContextBlock(recent, options.contextCompaction);
+      chunks.push(`--- Recent activity from @${name} ---\n${compacted}`);
     }
   }
   if (chunks.length === 0) return "";
